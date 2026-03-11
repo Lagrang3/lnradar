@@ -3,7 +3,10 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::network::Network;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use cln_plugin::{ConfiguredPlugin, Plugin};
-use cln_rpc::model::requests::{GetinfoRequest, GetroutesRequest};
+use cln_rpc::model::requests::{
+    GetinfoRequest, GetroutesRequest, SendpayRequest, SendpayRoute, WaitsendpayRequest,
+};
+use cln_rpc::model::responses::GetroutesRoutes;
 use cln_rpc::primitives::Amount;
 use cln_rpc::ClnRpc;
 use hex;
@@ -42,13 +45,21 @@ struct LnRadar {
 
 struct TestPayment {
     amount_msat: u64,
-    destination: PublicKey,
+    fake_destination_priv: SecretKey,
+    fake_destination_pubkey: PublicKey,
     payment_secret: PaymentSecret,
     payment_hash: sha256::Hash,
+    min_final_cltv_expiry: u16,
+    route_hint: RouteHintHop,
+    ctx: Secp256k1<bitcoin::secp256k1::All>,
 }
 
 impl TestPayment {
-    pub fn new(amount_msat: u64, destination: PublicKey) -> Result<Self> {
+    pub fn new(
+        amount_msat: u64,
+        fake_destination_priv: SecretKey,
+        real_destination: PublicKey,
+    ) -> Result<Self> {
         // Payment secret is random
         let mut payment_secret = [0u8; 32];
         SysRng.try_fill_bytes(&mut payment_secret)?;
@@ -60,42 +71,72 @@ impl TestPayment {
         SysRng.try_fill_bytes(&mut payment_hash[16..])?;
         let payment_hash = sha256::Hash::from_slice(&payment_hash[..])?;
 
-        Ok(Self {
-            amount_msat,
-            destination,
-            payment_secret,
-            payment_hash,
-        })
-    }
-    pub fn get_invoice(
-        &self,
-        currency: Currency,
-        private_key: &SecretKey,
-    ) -> Result<Bolt11Invoice> {
-        // We add a routehint that tells the sender how to get to this non-existent node. The trick is
-        // that it has to go through the real destination.
-        let rh = RouteHintHop {
-            src_node_id: self.destination.clone().into(),
+        let route_hint = RouteHintHop {
+            src_node_id: real_destination.into(),
             short_channel_id: (1 << 40) | (1 << 16) | 1,
             fees: RoutingFees {
                 base_msat: 0,
                 proportional_millionths: 0,
             },
-            cltv_expiry_delta: 9,
+            cltv_expiry_delta: 144,
             htlc_minimum_msat: None,
             htlc_maximum_msat: None,
         };
-        let rhs = RouteHint(vec![rh]);
+
+        let ctx = Secp256k1::new();
+        let btc_pk = bitcoin::secp256k1::PublicKey::from_secret_key(&ctx, &fake_destination_priv);
+        let cln_pk = cln_rpc::primitives::PublicKey::from_slice(&btc_pk.serialize()).unwrap();
+        let fake_destination_pubkey = PublicKey(cln_pk);
+
+        Ok(Self {
+            amount_msat,
+            fake_destination_priv,
+            fake_destination_pubkey,
+            payment_secret,
+            payment_hash,
+            min_final_cltv_expiry: 18,
+            route_hint,
+            ctx,
+        })
+    }
+    pub fn prev_destination(&self) -> PublicKey {
+        let btc_pk = self.route_hint.src_node_id.clone();
+        let cln_pk = cln_rpc::primitives::PublicKey::from_slice(&btc_pk.serialize()).unwrap();
+        PublicKey(cln_pk)
+    }
+    pub fn prev_delay(&self) -> u16 {
+        self.route_hint.cltv_expiry_delta + self.min_final_cltv_expiry
+    }
+    pub fn prev_amount_msat(&self) -> u64 {
+        let p: u64 = self.route_hint.fees.proportional_millionths.into();
+        let b: u64 = self.route_hint.fees.base_msat.into();
+        self.amount_msat + b + (p * self.amount_msat) / 1000000
+    }
+    pub fn final_hop(&self) -> SendpayRoute {
+        SendpayRoute {
+            amount_msat: Amount::from_msat(self.amount_msat),
+            delay: self.min_final_cltv_expiry.into(),
+            channel: self.route_hint.short_channel_id.into(),
+            id: self.fake_destination_pubkey.clone().into(),
+        }
+    }
+    pub fn get_invoice(&self, currency: Currency) -> Result<Bolt11Invoice> {
+        // We add a routehint that tells the sender how to get to this non-existent node. The trick is
+        // that it has to go through the real destination.
+        let rhs = RouteHint(vec![self.route_hint.clone()]);
 
         InvoiceBuilder::new(currency)
             .payment_hash(self.payment_hash)
             .amount_milli_satoshis(self.amount_msat)
             .description("Test invoice".into())
             .current_timestamp()
-            .min_final_cltv_expiry_delta(144)
+            .min_final_cltv_expiry_delta(self.min_final_cltv_expiry.into())
             .payment_secret(self.payment_secret)
             .private_route(rhs)
-            .build_signed(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, private_key))
+            .build_signed(|hash| {
+                self.ctx
+                    .sign_ecdsa_recoverable(hash, &self.fake_destination_priv)
+            })
             .map_err(|e| anyhow!("{e}"))
     }
 }
@@ -195,11 +236,43 @@ async fn testinvoice(
     let destination = PublicKey::from_value(&args["destination"])
         .context("failed to get mandatory field destination")?;
 
-    let test_payment = TestPayment::new(amount_msat, destination)?;
-    let invoice = test_payment.get_invoice(lnradar.currency.clone(), &lnradar.private_key)?;
+    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)?;
+    let invoice = test_payment.get_invoice(lnradar.currency.clone())?;
 
     let response = json!({"bolt11": invoice.to_string()});
     Ok(response)
+}
+
+fn convert_routes(r: &GetroutesRoutes) -> Result<Vec<SendpayRoute>> {
+    let sp_route: Result<Vec<SendpayRoute>> = r
+        .path
+        .iter()
+        .map(|hop| -> Result<SendpayRoute> {
+            let short_channel_id = hop
+                .short_channel_id_dir
+                .ok_or(anyhow!("hop in {r:?} is missing a short_channel_id_dir"))?
+                .short_channel_id;
+            Ok(SendpayRoute {
+                amount_msat: hop.amount_msat,
+                delay: hop.delay,
+                channel: short_channel_id,
+                id: hop.next_node_id,
+            })
+        })
+        .collect();
+
+    // Since there is an offset in getroutes hops we need an extra step to fix that
+    let mut sp_route = sp_route?;
+    let n = sp_route.len();
+    for i in 1..n {
+        sp_route[i - 1].amount_msat = sp_route[i].amount_msat;
+        sp_route[i - 1].delay = sp_route[i].delay;
+    }
+    sp_route[n - 1].amount_msat = r.amount_msat;
+    sp_route[n - 1].delay = r
+        .final_cltv
+        .ok_or(anyhow!("routes {r:?} is missing the final_cltv"))?;
+    Ok(sp_route)
 }
 
 async fn testpayment(
@@ -214,14 +287,14 @@ async fn testpayment(
     let destination = PublicKey::from_value(&args["destination"])
         .context("failed to get mandatory field destination")?;
 
-    let test_payment = TestPayment::new(amount_msat, destination)?;
+    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)?;
 
     let mut rpc = ClnRpc::from_plugin(&p).await?;
 
     let getroutes_req = GetroutesRequest {
         source: lnradar.nodeid.clone().into(),
-        destination: test_payment.destination.clone().into(),
-        amount_msat: Amount::from_msat(test_payment.amount_msat),
+        destination: test_payment.prev_destination().into(),
+        amount_msat: Amount::from_msat(test_payment.prev_amount_msat()),
         layers: vec![
             "auto.no_mpp_support".to_string(),
             "auto.localchans".to_string(),
@@ -229,15 +302,50 @@ async fn testpayment(
             "xpay".to_string(), // use xpay knowledge
         ],
         // FIXME: how much in fees is acceptable here?
-        maxfee_msat: Amount::from_msat(test_payment.amount_msat),
+        maxfee_msat: Amount::from_msat(test_payment.prev_amount_msat()),
         maxdelay: None,
         maxparts: Some(1),
-        final_cltv: Some(18),
+        final_cltv: Some(test_payment.prev_delay().into()),
     };
     let getroutes = rpc.call_typed(&getroutes_req).await?;
-    // FIXME: create onion
-    // FIXME: call injectpaymentonion and wait response
+
+    // FIXME: maybe it would be better to keep byte types and then convert to specific library
+    // types when needed
+    let payment_hash =
+        cln_rpc::primitives::Sha256::from_bytes_ref(test_payment.payment_hash.as_byte_array());
+    let payment_secret =
+        cln_rpc::primitives::Secret::try_from(test_payment.payment_secret.0.to_vec())?;
+    let partid = 0;
+    let groupid = 1;
+    let mut sendpay_route = convert_routes(&getroutes.routes[0])?;
+    sendpay_route.push(test_payment.final_hop());
+
+    let sendpay_req = SendpayRequest {
+        payment_hash: *payment_hash,
+        payment_secret: Some(payment_secret),
+        route: sendpay_route,
+        amount_msat: Some(Amount::from_msat(test_payment.amount_msat)),
+        partid: Some(partid),
+        groupid: Some(groupid),
+        bolt11: None,
+        description: None,
+        label: None,
+        localinvreqid: None,
+        payment_metadata: None,
+    };
+    let sendpay = rpc.call_typed(&sendpay_req).await?;
+
+    // waitsendpay payment_hash [timeout] [partid groupid]
+    let waitsendpay_req = WaitsendpayRequest {
+        payment_hash: *payment_hash,
+        partid: Some(partid),
+        groupid: Some(groupid),
+        timeout: Some(60),
+    };
+    let waitsendpay = rpc.call_typed(&waitsendpay_req).await;
+
     // FIXME: process response
     // FIXME: feed results back to askrene
-    Ok(json!({"getroutes": getroutes}))
+
+    Ok(json!({"getroutes": getroutes, "sendpay": sendpay, "waitsendpay": waitsendpay}))
 }
