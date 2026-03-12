@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::network::Network;
-use bitcoin::secp256k1::{Secp256k1, SecretKey};
+use bitcoin::secp256k1::Secp256k1;
 use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
     GetinfoRequest, GetroutesRequest, SendpayRequest, SendpayRoute, WaitsendpayRequest,
@@ -23,6 +23,9 @@ use std::str::FromStr;
 // impossible to interoperably use a single PublicKey struct here.
 #[derive(Debug, Clone)]
 struct PublicKey(bitcoin::secp256k1::PublicKey);
+
+#[derive(Debug, Clone)]
+struct SecretKey(bitcoin::secp256k1::SecretKey);
 
 impl Into<cln_rpc::primitives::PublicKey> for PublicKey {
     fn into(self) -> cln_rpc::primitives::PublicKey {
@@ -50,8 +53,38 @@ impl From<bitcoin::secp256k1::PublicKey> for PublicKey {
 
 impl PublicKey {
     fn from_secret_key(ctx: &Secp256k1<bitcoin::secp256k1::All>, privk: &SecretKey) -> Self {
-        let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&ctx, &privk);
+        let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&ctx, &privk.0);
         PublicKey(pk)
+    }
+}
+
+impl SecretKey {
+    fn from_byte_array(s: [u8; 32]) -> Result<Self> {
+        // FIXME: from_slice is deprecated in newer versions of secp256k1
+        let k = bitcoin::secp256k1::SecretKey::from_slice(&s[..])?;
+        Ok(SecretKey(k))
+    }
+}
+
+impl Into<bitcoin::secp256k1::SecretKey> for SecretKey {
+    fn into(self) -> bitcoin::secp256k1::SecretKey {
+        self.0
+    }
+}
+
+trait FromJson {
+    fn from_value(value: &Value) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+impl FromJson for PublicKey {
+    fn from_value(value: &Value) -> Result<Self> {
+        let pk = value.as_str().context("field is missing")?;
+        let pk: [u8; 33] = hex::FromHex::from_hex(pk).context("failed converting string to hex")?;
+        let pk = bitcoin::secp256k1::PublicKey::from_slice(&pk[..])
+            .context("failed converting hex to PublicKey")?;
+        Ok(pk.into())
     }
 }
 
@@ -139,7 +172,7 @@ impl TestPayment {
         // We add a routehint that tells the sender how to get to this non-existent node. The trick is
         // that it has to go through the real destination.
         let rhs = RouteHint(vec![self.route_hint.clone()]);
-
+        let btc_sk: bitcoin::secp256k1::SecretKey = self.fake_destination_priv.clone().into();
         InvoiceBuilder::new(currency)
             .payment_hash(self.payment_hash)
             .amount_milli_satoshis(self.amount_msat)
@@ -148,27 +181,8 @@ impl TestPayment {
             .min_final_cltv_expiry_delta(self.min_final_cltv_expiry.into())
             .payment_secret(self.payment_secret)
             .private_route(rhs)
-            .build_signed(|hash| {
-                self.ctx
-                    .sign_ecdsa_recoverable(hash, &self.fake_destination_priv)
-            })
+            .build_signed(|hash| self.ctx.sign_ecdsa_recoverable(hash, &btc_sk))
             .map_err(|e| anyhow!("{e}"))
-    }
-}
-
-trait FromJson {
-    fn from_value(value: &Value) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-impl FromJson for PublicKey {
-    fn from_value(value: &Value) -> Result<Self> {
-        let pk = value.as_str().context("field is missing")?;
-        let pk: [u8; 33] = hex::FromHex::from_hex(pk).context("failed converting string to hex")?;
-        let pk = bitcoin::secp256k1::PublicKey::from_slice(&pk[..])
-            .context("failed converting hex to PublicKey")?;
-        Ok(pk.into())
     }
 }
 
@@ -223,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The private key used for the final hop. It is well-known so the penultimate hop can
     // decode the onion.
-    let private_key = SecretKey::from_slice(&[0xaa; 32][..])?;
+    let private_key = SecretKey::from_byte_array([0xaa; 32])?;
 
     let mut rpc = ClnRpc::from_plugin(&plugin).await?;
     let getinfo = rpc.call_typed(&GetinfoRequest {}).await?;
