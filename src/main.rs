@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::network::Network;
 use bitcoin::secp256k1::Secp256k1;
@@ -85,9 +85,13 @@ trait FromJson {
 
 impl FromJson for PublicKey {
     fn from_value(value: &Value) -> Result<Self> {
-        let pk = value.as_str().context("field is missing")?;
-        let pk: [u8; 33] = hex::FromHex::from_hex(pk).context("failed converting string to hex")?;
-        PublicKey::from_byte_array(pk).context("failed converting hex to PublicKey")
+        let pk = value
+            .as_str()
+            .ok_or(anyhow!("failed to read field as str"))?;
+        let pk: [u8; 33] = hex::FromHex::from_hex(pk)
+            .map_err(|e| anyhow!("failed converting string to hex: {e}"))?;
+        PublicKey::from_byte_array(pk)
+            .map_err(|e| anyhow!("failed converting hex to PublicKey: {e}"))
     }
 }
 
@@ -117,14 +121,19 @@ impl TestPayment {
     ) -> Result<Self> {
         // Payment secret is random
         let mut payment_secret = [0u8; 32];
-        SysRng.try_fill_bytes(&mut payment_secret)?;
+        SysRng
+            .try_fill_bytes(&mut payment_secret)
+            .map_err(|e| anyhow!("failed creating payment_secret: {e}"))?;
         let payment_secret = PaymentSecret(payment_secret);
 
         // Something we don't have a preimage for, and allows downstream nodes to recognize this as a
         // test payment.
         let mut payment_hash = [0xaa; 32];
-        SysRng.try_fill_bytes(&mut payment_hash[16..])?;
-        let payment_hash = sha256::Hash::from_slice(&payment_hash[..])?;
+        SysRng
+            .try_fill_bytes(&mut payment_hash[16..])
+            .map_err(|e| anyhow!("failed creating payment_hash: {e}"))?;
+        let payment_hash = sha256::Hash::from_slice(&payment_hash[..])
+            .map_err(|e| anyhow!("error while converting payment_hash type: {e}"))?;
 
         let route_hint = RouteHintHop {
             src_node_id: real_destination.into(),
@@ -266,10 +275,13 @@ async fn testinvoice(
         .as_u64()
         .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
     let destination = PublicKey::from_value(&args["destination"])
-        .context("failed to get mandatory field destination")?;
+        .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
 
-    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)?;
-    let invoice = test_payment.get_invoice(lnradar.currency.clone())?;
+    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
+        .map_err(|e| anyhow!("failed to create test_payment: {e}"))?;
+    let invoice = test_payment
+        .get_invoice(lnradar.currency.clone())
+        .map_err(|e| anyhow!("failed to create invoice: {e}"))?;
 
     let response = json!({"bolt11": invoice.to_string()});
     Ok(response)
@@ -313,15 +325,20 @@ async fn testpayment(
 ) -> Result<Value, cln_plugin::Error> {
     let lnradar = p.state();
 
+    // we use map_err instead of context because the plugin error message only contains the context
+    // and not the details of the error
     let amount_msat = args["amount_msat"]
         .as_u64()
         .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
     let destination = PublicKey::from_value(&args["destination"])
-        .context("failed to get mandatory field destination")?;
+        .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
 
-    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)?;
+    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
+        .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
 
-    let mut rpc = ClnRpc::from_plugin(&p).await?;
+    let mut rpc = ClnRpc::from_plugin(&p)
+        .await
+        .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin {e}"))?;
 
     let getroutes_req = GetroutesRequest {
         source: lnradar.nodeid.clone().into(),
@@ -339,17 +356,22 @@ async fn testpayment(
         maxparts: Some(1),
         final_cltv: Some(test_payment.prev_delay().into()),
     };
-    let getroutes = rpc.call_typed(&getroutes_req).await?;
+    let getroutes = rpc
+        .call_typed(&getroutes_req)
+        .await
+        .map_err(|e| anyhow!("getroutes failed: {e}"))?;
 
     // FIXME: maybe it would be better to keep byte types and then convert to specific library
     // types when needed
     let payment_hash =
         cln_rpc::primitives::Sha256::from_bytes_ref(test_payment.payment_hash.as_byte_array());
     let payment_secret =
-        cln_rpc::primitives::Secret::try_from(test_payment.payment_secret.0.to_vec())?;
+        cln_rpc::primitives::Secret::try_from(test_payment.payment_secret.0.to_vec())
+            .map_err(|e| anyhow!("invalid payment secret: {e}"))?;
     let partid = 0;
     let groupid = 1;
-    let mut sendpay_route = convert_routes(&getroutes.routes[0])?;
+    let mut sendpay_route = convert_routes(&getroutes.routes[0])
+        .map_err(|e| anyhow!("couldn't convert routes types: {e}"))?;
     sendpay_route.push(test_payment.final_hop());
 
     let sendpay_req = SendpayRequest {
@@ -365,7 +387,10 @@ async fn testpayment(
         localinvreqid: None,
         payment_metadata: None,
     };
-    let sendpay = rpc.call_typed(&sendpay_req).await?;
+    let sendpay = rpc
+        .call_typed(&sendpay_req)
+        .await
+        .map_err(|e| anyhow!("sendpay failed: {e}"))?;
 
     // waitsendpay payment_hash [timeout] [partid groupid]
     let waitsendpay_req = WaitsendpayRequest {
@@ -374,7 +399,12 @@ async fn testpayment(
         groupid: Some(groupid),
         timeout: Some(60),
     };
-    let waitsendpay = rpc.call_typed(&waitsendpay_req).await;
+    let waitsendpay = match rpc.call_typed(&waitsendpay_req).await {
+        Ok(w) => {
+            return Err(anyhow!("unexpected waitsendpay success {w:?}"));
+        }
+        Err(w) => w,
+    };
 
     // FIXME: process response
     // FIXME: feed results back to askrene
