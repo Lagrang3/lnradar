@@ -406,12 +406,11 @@ async fn testpayment(
         groupid: Some(groupid),
         timeout: Some(60),
     };
-    let waitsendpay = match rpc.call_typed(&waitsendpay_req).await {
-        Ok(w) => {
-            return Err(anyhow!("unexpected waitsendpay success {w:?}"));
-        }
-        Err(w) => w,
-    };
+    let waitsendpay = rpc
+        .call_typed(&waitsendpay_req)
+        .await
+        .err()
+        .ok_or(anyhow!("unexpected waitsendpay success"))?;
 
     let data = waitsendpay
         .clone()
