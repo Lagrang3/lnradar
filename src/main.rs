@@ -22,17 +22,36 @@ use std::str::FromStr;
 // Incompatible versions of the bitcoin library for cln_rpc and lightning crates makes it
 // impossible to interoperably use a single PublicKey struct here.
 #[derive(Debug, Clone)]
-struct PublicKey(cln_rpc::primitives::PublicKey);
+struct PublicKey(bitcoin::secp256k1::PublicKey);
 
 impl Into<cln_rpc::primitives::PublicKey> for PublicKey {
     fn into(self) -> cln_rpc::primitives::PublicKey {
-        self.0
+        cln_rpc::primitives::PublicKey::from_slice(&self.0.serialize()).expect("invalid key")
     }
 }
 
 impl Into<bitcoin::secp256k1::PublicKey> for PublicKey {
     fn into(self) -> bitcoin::secp256k1::PublicKey {
-        bitcoin::secp256k1::PublicKey::from_slice(&self.0.serialize()).expect("invalid key")
+        self.0
+    }
+}
+
+impl From<cln_rpc::primitives::PublicKey> for PublicKey {
+    fn from(pk: cln_rpc::primitives::PublicKey) -> PublicKey {
+        let pk = bitcoin::secp256k1::PublicKey::from_slice(&pk.serialize()).expect("invalid key");
+        PublicKey(pk)
+    }
+}
+impl From<bitcoin::secp256k1::PublicKey> for PublicKey {
+    fn from(pk: bitcoin::secp256k1::PublicKey) -> PublicKey {
+        PublicKey(pk)
+    }
+}
+
+impl PublicKey {
+    fn from_secret_key(ctx: &Secp256k1<bitcoin::secp256k1::All>, privk: &SecretKey) -> Self {
+        let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&ctx, &privk);
+        PublicKey(pk)
     }
 }
 
@@ -84,9 +103,7 @@ impl TestPayment {
         };
 
         let ctx = Secp256k1::new();
-        let btc_pk = bitcoin::secp256k1::PublicKey::from_secret_key(&ctx, &fake_destination_priv);
-        let cln_pk = cln_rpc::primitives::PublicKey::from_slice(&btc_pk.serialize()).unwrap();
-        let fake_destination_pubkey = PublicKey(cln_pk);
+        let fake_destination_pubkey = PublicKey::from_secret_key(&ctx, &fake_destination_priv);
 
         Ok(Self {
             amount_msat,
@@ -100,9 +117,7 @@ impl TestPayment {
         })
     }
     pub fn prev_destination(&self) -> PublicKey {
-        let btc_pk = self.route_hint.src_node_id.clone();
-        let cln_pk = cln_rpc::primitives::PublicKey::from_slice(&btc_pk.serialize()).unwrap();
-        PublicKey(cln_pk)
+        self.route_hint.src_node_id.clone().into()
     }
     pub fn prev_delay(&self) -> u16 {
         self.route_hint.cltv_expiry_delta + self.min_final_cltv_expiry
@@ -151,9 +166,9 @@ impl FromJson for PublicKey {
     fn from_value(value: &Value) -> Result<Self> {
         let pk = value.as_str().context("field is missing")?;
         let pk: [u8; 33] = hex::FromHex::from_hex(pk).context("failed converting string to hex")?;
-        let pk = cln_rpc::primitives::PublicKey::from_slice(&pk[..])
+        let pk = bitcoin::secp256k1::PublicKey::from_slice(&pk[..])
             .context("failed converting hex to PublicKey")?;
-        Ok(PublicKey(pk))
+        Ok(pk.into())
     }
 }
 
@@ -212,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut rpc = ClnRpc::from_plugin(&plugin).await?;
     let getinfo = rpc.call_typed(&GetinfoRequest {}).await?;
-    let nodeid = PublicKey(getinfo.id);
+    let nodeid: PublicKey = getinfo.id.clone().into();
 
     let state = LnRadar {
         currency: network.into(),
