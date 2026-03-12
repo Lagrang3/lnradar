@@ -19,6 +19,13 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::str::FromStr;
 
+#[repr(u64)]
+enum ErrorCode {
+    UnknownNextPeer = 0x400a,
+    IncorrectOrUnknownPaymentDetails = 0x400f,
+    TemporaryChannelFailure = 0x1007,
+}
+
 // Incompatible versions of the bitcoin library for cln_rpc and lightning crates makes it
 // impossible to interoperably use a single PublicKey struct here.
 #[derive(Debug, Clone)]
@@ -406,7 +413,29 @@ async fn testpayment(
         Err(w) => w,
     };
 
-    // FIXME: process response
+    let data = waitsendpay
+        .clone()
+        .data
+        .ok_or(anyhow!("data is not present in waitsendpay error"))?;
+    let failcode = data["failcode"]
+        .as_u64()
+        .ok_or(anyhow!("can't read failcode from waitsendpay response"))?;
+
+    match failcode {
+        val if val == ErrorCode::UnknownNextPeer as u64 => {
+            log::info!("Probe success");
+        }
+        val if val == ErrorCode::IncorrectOrUnknownPaymentDetails as u64 => {
+            log::info!("Probe success, a node that runs testpay");
+        }
+        val if val == ErrorCode::TemporaryChannelFailure as u64 => {
+            log::info!("Probe failed, possibly liquidity constraints");
+        }
+        _ => {
+            log::warn!("Unrecognized error code: {failcode}");
+        }
+    };
+
     // FIXME: feed results back to askrene
 
     Ok(json!({"getroutes": getroutes, "sendpay": sendpay, "waitsendpay": waitsendpay}))

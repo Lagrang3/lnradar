@@ -465,6 +465,7 @@ dependencies = [
  "hex",
  "lightning-invoice",
  "lightning-types",
+ "log",
  "rand",
  "serde_json",
  "tokio",

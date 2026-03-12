@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+log = "*"
 hex = "0.4.3"
 rand = { version = "0.10.0", features = ["sys_rng"] }
 lightning-invoice = { version = "0.34.0", features = ["serde", "std"] }
