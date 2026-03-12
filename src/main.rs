@@ -1,12 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::network::Network;
 use bitcoin::secp256k1::Secp256k1;
 use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
-    GetinfoRequest, GetroutesRequest, SendpayRequest, SendpayRoute, WaitsendpayRequest,
+    AskreneinformchannelInform, AskreneinformchannelRequest, GetinfoRequest, GetroutesRequest,
+    SendpayRequest, SendpayRoute, WaitsendpayRequest,
 };
-use cln_rpc::model::responses::GetroutesRoutes;
+use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
 use cln_rpc::primitives::Amount;
 use cln_rpc::ClnRpc;
 use hex;
@@ -326,6 +327,39 @@ fn convert_routes(r: &GetroutesRoutes) -> Result<Vec<SendpayRoute>> {
     Ok(sp_route)
 }
 
+// We can't just use getroutes_path because the amounts are wrong.
+// We can't just use sendpay_path because the channels are identified as short_channel_id instead
+// of the needed short_channel_id_dir.
+async fn knowledge_good_channels(
+    p: cln_plugin::Plugin<LnRadar>,
+    erring_index: usize,
+    sendpay_path: &Vec<SendpayRoute>,
+    getroutes_path: &Vec<GetroutesRoutesPath>,
+) -> Result<()> {
+    let mut rpc = ClnRpc::from_plugin(&p)
+        .await
+        .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
+    if sendpay_path.len() < erring_index || getroutes_path.len() < erring_index {
+        return Err(anyhow!("erring_index is out of bounds"));
+    }
+    for (sp_hop, gr_hop) in std::iter::zip(
+        &sendpay_path[..erring_index],
+        &getroutes_path[..erring_index],
+    ) {
+        let askrene_req = AskreneinformchannelRequest {
+            layer: "xpay".to_string(),
+            amount_msat: Some(sp_hop.amount_msat),
+            short_channel_id_dir: gr_hop.short_channel_id_dir,
+            inform: Some(AskreneinformchannelInform::UNCONSTRAINED),
+        };
+        let _ = rpc
+            .call_typed(&askrene_req)
+            .await
+            .map_err(|e| anyhow!("askrene-inform-channel failed: {e}"))?;
+    }
+    Ok(())
+}
+
 async fn testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -384,7 +418,7 @@ async fn testpayment(
     let sendpay_req = SendpayRequest {
         payment_hash: *payment_hash,
         payment_secret: Some(payment_secret),
-        route: sendpay_route,
+        route: sendpay_route.clone(),
         amount_msat: Some(Amount::from_msat(test_payment.amount_msat)),
         partid: Some(partid),
         groupid: Some(groupid),
@@ -419,6 +453,11 @@ async fn testpayment(
     let failcode = data["failcode"]
         .as_u64()
         .ok_or(anyhow!("can't read failcode from waitsendpay response"))?;
+    let erring_index: usize = data["erring_index"]
+        .as_u64()
+        .ok_or(anyhow!("can't read erring_index from waitsendpay response"))?
+        .try_into()
+        .context("failed to convert erring_index into usize")?;
 
     match failcode {
         val if val == ErrorCode::UnknownNextPeer as u64 => {
@@ -435,7 +474,13 @@ async fn testpayment(
         }
     };
 
-    // FIXME: feed results back to askrene
+    let getroutes_route = getroutes.routes[0].path.clone();
+    match knowledge_good_channels(p.clone(), erring_index, &sendpay_route, &getroutes_route).await {
+        Err(e) => {
+            log::warn!("failed to update knowledge: {e}");
+        }
+        _ => {}
+    }
 
     Ok(json!({"getroutes": getroutes, "sendpay": sendpay, "waitsendpay": waitsendpay}))
 }
