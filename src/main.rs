@@ -56,6 +56,11 @@ impl PublicKey {
         let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&ctx, &privk.0);
         PublicKey(pk)
     }
+    fn from_byte_array(s: [u8; 33]) -> Result<Self> {
+        // FIXME: from_slice is deprecated in newer versions of secp256k1
+        let k = bitcoin::secp256k1::PublicKey::from_slice(&s[..])?;
+        Ok(PublicKey(k))
+    }
 }
 
 impl SecretKey {
@@ -82,9 +87,7 @@ impl FromJson for PublicKey {
     fn from_value(value: &Value) -> Result<Self> {
         let pk = value.as_str().context("field is missing")?;
         let pk: [u8; 33] = hex::FromHex::from_hex(pk).context("failed converting string to hex")?;
-        let pk = bitcoin::secp256k1::PublicKey::from_slice(&pk[..])
-            .context("failed converting hex to PublicKey")?;
-        Ok(pk.into())
+        PublicKey::from_byte_array(pk).context("failed converting hex to PublicKey")
     }
 }
 
