@@ -360,6 +360,31 @@ async fn knowledge_good_channels(
     Ok(())
 }
 
+async fn knowledge_bad_channel(
+    p: cln_plugin::Plugin<LnRadar>,
+    erring_index: usize,
+    sendpay_path: &Vec<SendpayRoute>,
+    getroutes_path: &Vec<GetroutesRoutesPath>,
+) -> Result<()> {
+    let mut rpc = ClnRpc::from_plugin(&p)
+        .await
+        .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
+    if sendpay_path.len() <= erring_index || getroutes_path.len() <= erring_index {
+        return Err(anyhow!("erring_index is out of bounds"));
+    }
+    let askrene_req = AskreneinformchannelRequest {
+        layer: "xpay".to_string(),
+        amount_msat: Some(sendpay_path[erring_index].amount_msat),
+        short_channel_id_dir: getroutes_path[erring_index].short_channel_id_dir,
+        inform: Some(AskreneinformchannelInform::CONSTRAINED),
+    };
+    let _ = rpc
+        .call_typed(&askrene_req)
+        .await
+        .map_err(|e| anyhow!("askrene-inform-channel failed: {e}"))?;
+    Ok(())
+}
+
 async fn testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -477,9 +502,20 @@ async fn testpayment(
     let getroutes_route = getroutes.routes[0].path.clone();
     match knowledge_good_channels(p.clone(), erring_index, &sendpay_route, &getroutes_route).await {
         Err(e) => {
-            log::warn!("failed to update knowledge: {e}");
+            log::warn!("failed to update knowledge for good channels: {e}");
         }
         _ => {}
+    }
+    if failcode == ErrorCode::TemporaryChannelFailure as u64
+        && erring_index <= getroutes_route.len()
+    {
+        match knowledge_bad_channel(p.clone(), erring_index, &sendpay_route, &getroutes_route).await
+        {
+            Err(e) => {
+                log::warn!("failed to update knowledge for failed channel: {e}");
+            }
+            _ => {}
+        }
     }
 
     Ok(json!({"getroutes": getroutes, "sendpay": sendpay, "waitsendpay": waitsendpay}))
