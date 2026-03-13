@@ -132,16 +132,9 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
     loop {
         // every minute apply aging to layers
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        match age_layer(
-            p.clone(),
-            json!({
-                    "layer": LNRADAR_LAYER.to_string(),
-                    "time_secs": LNRADAR_AGE_TIME}),
-        )
-        .await
-        {
+        match age_layer(p.clone(), LNRADAR_LAYER, LNRADAR_AGE_TIME).await {
             Ok(_) => {
-                log::info!("Aged layer");
+                log::info!("Aged layer: {LNRADAR_LAYER}");
             }
             Err(e) => {
                 log::warn!("Failed to age layer: {e}");
@@ -152,14 +145,9 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
 
 async fn age_layer(
     p: cln_plugin::Plugin<LnRadar>,
-    args: Value,
+    layer: &str,
+    time_secs: u64,
 ) -> Result<Value, cln_plugin::Error> {
-    let time_secs = args["time_secs"]
-        .as_u64()
-        .ok_or(anyhow!("Missing mandatory field time_secs"))?;
-    let layer = args["layer"]
-        .as_str()
-        .ok_or(anyhow!("Missing mandatory field layer"))?;
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
