@@ -399,6 +399,12 @@ async fn testpayment(
     let destination = PublicKey::from_value(&args["destination"])
         .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
 
+    log::trace!(
+        "testpayment called with amount_msat: {} and destination: {}",
+        args["amount_msat"],
+        args["destination"]
+    );
+
     let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
         .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
 
