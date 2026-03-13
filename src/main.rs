@@ -4,8 +4,8 @@ use bitcoin::network::Network;
 use bitcoin::secp256k1::Secp256k1;
 use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
-    AskreneinformchannelInform, AskreneinformchannelRequest, GetinfoRequest, GetroutesRequest,
-    SendpayRequest, SendpayRoute, WaitsendpayRequest,
+    AskreneinformchannelInform, AskreneinformchannelRequest, AskreneupdatechannelRequest,
+    GetinfoRequest, GetroutesRequest, SendpayRequest, SendpayRoute, WaitsendpayRequest,
 };
 use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
 use cln_rpc::primitives::Amount;
@@ -25,6 +25,7 @@ enum ErrorCode {
     UnknownNextPeer = 0x400a,
     IncorrectOrUnknownPaymentDetails = 0x400f,
     TemporaryChannelFailure = 0x1007,
+    FeeInsufficient = 0x100c,
 }
 
 // Incompatible versions of the bitcoin library for cln_rpc and lightning crates makes it
@@ -385,6 +386,40 @@ async fn knowledge_bad_channel(
     Ok(())
 }
 
+async fn knowledge_disable_channel(
+    p: cln_plugin::Plugin<LnRadar>,
+    erring_index: usize,
+    getroutes_path: &Vec<GetroutesRoutesPath>,
+) -> Result<()> {
+    let mut rpc = ClnRpc::from_plugin(&p)
+        .await
+        .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
+    if getroutes_path.len() <= erring_index {
+        return Err(anyhow!("erring_index is out of bounds"));
+    }
+    let scidd = getroutes_path[erring_index]
+        .short_channel_id_dir
+        .ok_or(anyhow!(
+            "missing short_channel_id_dir in hop {:?}",
+            getroutes_path[erring_index]
+        ))?;
+    let askrene_req = AskreneupdatechannelRequest {
+        layer: "xpay".to_string(),
+        short_channel_id_dir: scidd,
+        enabled: Some(false),
+        cltv_expiry_delta: None,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        htlc_minimum_msat: None,
+        htlc_maximum_msat: None,
+    };
+    let _ = rpc
+        .call_typed(&askrene_req)
+        .await
+        .map_err(|e| anyhow!("askrene-update-channel failed: {e}"))?;
+    Ok(())
+}
+
 async fn testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -490,6 +525,7 @@ async fn testpayment(
         .try_into()
         .context("failed to convert erring_index into usize")?;
 
+    let getroutes_route = getroutes.routes[0].path.clone();
     match failcode {
         val if val == ErrorCode::UnknownNextPeer as u64 => {
             log::info!("Probe success");
@@ -499,29 +535,36 @@ async fn testpayment(
         }
         val if val == ErrorCode::TemporaryChannelFailure as u64 => {
             log::info!("Probe failed, possibly liquidity constraints");
+            match knowledge_bad_channel(p.clone(), erring_index, &sendpay_route, &getroutes_route)
+                .await
+            {
+                Err(e) => {
+                    log::warn!("failed to update knowledge for failed channel: {e}");
+                }
+                _ => {}
+            }
+        }
+        val if val == ErrorCode::FeeInsufficient as u64 => {
+            log::info!("Probe failed, fee_insufficient");
+            // We could have taken the raw message from waitsendpay to update the channel fees, but
+            // this is simpler.
+            match knowledge_disable_channel(p.clone(), erring_index, &getroutes_route).await {
+                Err(e) => {
+                    log::warn!("failed to disable bad channel: {e}");
+                }
+                _ => {}
+            }
         }
         _ => {
             log::warn!("Unrecognized error code: {failcode}");
         }
     };
 
-    let getroutes_route = getroutes.routes[0].path.clone();
     match knowledge_good_channels(p.clone(), erring_index, &sendpay_route, &getroutes_route).await {
         Err(e) => {
             log::warn!("failed to update knowledge for good channels: {e}");
         }
         _ => {}
-    }
-    if failcode == ErrorCode::TemporaryChannelFailure as u64
-        && erring_index <= getroutes_route.len()
-    {
-        match knowledge_bad_channel(p.clone(), erring_index, &sendpay_route, &getroutes_route).await
-        {
-            Err(e) => {
-                log::warn!("failed to update knowledge for failed channel: {e}");
-            }
-            _ => {}
-        }
     }
 
     Ok(json!({"getroutes": getroutes, "sendpay": sendpay, "waitsendpay": waitsendpay}))
