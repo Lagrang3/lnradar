@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::str::FromStr;
 
+const LNRADAR_LAYER: &str = "lnradar";
+
 #[repr(u64)]
 enum ErrorCode {
     UnknownNextPeer = 0x400a,
@@ -348,7 +350,7 @@ async fn knowledge_good_channels(
         &getroutes_path[..erring_index],
     ) {
         let askrene_req = AskreneinformchannelRequest {
-            layer: "xpay".to_string(),
+            layer: LNRADAR_LAYER.to_string(),
             amount_msat: Some(sp_hop.amount_msat),
             short_channel_id_dir: gr_hop.short_channel_id_dir,
             inform: Some(AskreneinformchannelInform::UNCONSTRAINED),
@@ -374,7 +376,7 @@ async fn knowledge_bad_channel(
         return Err(anyhow!("erring_index is out of bounds"));
     }
     let askrene_req = AskreneinformchannelRequest {
-        layer: "xpay".to_string(),
+        layer: LNRADAR_LAYER.to_string(),
         amount_msat: Some(sendpay_path[erring_index].amount_msat),
         short_channel_id_dir: getroutes_path[erring_index].short_channel_id_dir,
         inform: Some(AskreneinformchannelInform::CONSTRAINED),
@@ -404,7 +406,7 @@ async fn knowledge_disable_channel(
             getroutes_path[erring_index]
         ))?;
     let askrene_req = AskreneupdatechannelRequest {
-        layer: "xpay".to_string(),
+        layer: LNRADAR_LAYER.to_string(),
         short_channel_id_dir: scidd,
         enabled: Some(false),
         cltv_expiry_delta: None,
@@ -455,7 +457,8 @@ async fn testpayment(
             "auto.no_mpp_support".to_string(),
             "auto.localchans".to_string(),
             "auto.sourcefree".to_string(),
-            "xpay".to_string(), // use xpay knowledge
+            "xpay".to_string(),        // use xpay knowledge
+            LNRADAR_LAYER.to_string(), // also bring our own layer
         ],
         // FIXME: how much in fees is acceptable here?
         maxfee_msat: Amount::from_msat(test_payment.prev_amount_msat()),
