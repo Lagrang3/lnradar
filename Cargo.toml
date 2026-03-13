@@ -3,6 +3,10 @@ name = "lnradar"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "lnradar"
+path = "src/main.rs"
+
 [dependencies]
 log = "*"
 hex = "0.4.3"
