@@ -99,6 +99,11 @@ async fn main() -> anyhow::Result<()> {
             "Command to probe a payment path",
             testpayment,
         )
+        .rpcmethod(
+            "testpayment-loop",
+            "Command to try different probe paths to a destination",
+            testpayment_loop,
+        )
         .dynamic()
         .configure()
         .await?
@@ -343,7 +348,8 @@ struct ProbeResult {
 
 async fn send_probe(
     p: cln_plugin::Plugin<LnRadar>,
-    test_payment: TestPayment,
+    test_payment: &TestPayment,
+    groupid: u64,
 ) -> Result<ProbeResult> {
     let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
@@ -380,7 +386,6 @@ async fn send_probe(
         cln_rpc::primitives::Secret::try_from(test_payment.payment_secret.0.to_vec())
             .map_err(|e| anyhow!("invalid payment secret: {e}"))?;
     let partid = 0;
-    let groupid = 1;
     let mut sendpay_route = convert_routes(&getroutes.routes[0])
         .map_err(|e| anyhow!("couldn't convert routes types: {e}"))?;
     let getroutes_path = getroutes.routes.remove(0).path;
@@ -516,7 +521,7 @@ async fn testpayment(
     let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
         .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
 
-    let results = send_probe(p.clone(), test_payment).await?;
+    let results = send_probe(p.clone(), &test_payment, 1).await?;
 
     match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
         Ok(_) => {}
@@ -539,4 +544,52 @@ async fn testpayment(
     Ok(
         json!({"getroutes": results.getroutes_path, "sendpay": results.sendpay, "waitsendpay": results.waitsendpay}),
     )
+}
+
+async fn testpayment_loop(
+    p: cln_plugin::Plugin<LnRadar>,
+    args: Value,
+) -> Result<Value, cln_plugin::Error> {
+    let lnradar = p.state();
+
+    // we use map_err instead of context because the plugin error message only contains the context
+    // and not the details of the error
+    let amount_msat = args["amount_msat"]
+        .as_u64()
+        .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
+    let destination = PublicKey::from_value(&args["destination"])
+        .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
+
+    log::trace!(
+        "testpayment called with amount_msat: {} and destination: {}",
+        args["amount_msat"],
+        args["destination"]
+    );
+
+    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
+        .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
+
+    let mut groupid: u64 = 0;
+    loop {
+        groupid += 1;
+        let results = send_probe(p.clone(), &test_payment, groupid).await?;
+        match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("Failed to update knowledge: {e}");
+            }
+        };
+        match results.failcode {
+            ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
+                log::info!("Probe success");
+                return Ok(
+                    json!({"getroutes": results.getroutes_path, "sendpay": results.sendpay, "waitsendpay": results.waitsendpay}),
+                );
+            }
+            _ => {
+                log::info!("Probe failed");
+                continue;
+            }
+        };
+    }
 }
