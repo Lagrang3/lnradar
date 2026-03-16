@@ -34,6 +34,22 @@ enum ErrorCode {
     FeeInsufficient = 0x100c,
 }
 
+impl ErrorCode {
+    pub fn from_u64(n: u64) -> Option<Self> {
+        match n {
+            n if n == ErrorCode::UnknownNextPeer as u64 => Some(ErrorCode::UnknownNextPeer),
+            n if n == ErrorCode::IncorrectOrUnknownPaymentDetails as u64 => {
+                Some(ErrorCode::IncorrectOrUnknownPaymentDetails)
+            }
+            n if n == ErrorCode::TemporaryChannelFailure as u64 => {
+                Some(ErrorCode::TemporaryChannelFailure)
+            }
+            n if n == ErrorCode::FeeInsufficient as u64 => Some(ErrorCode::FeeInsufficient),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LnRadar {
     pub currency: Currency,
@@ -420,14 +436,15 @@ async fn testpayment(
         .context("failed to convert erring_index into usize")?;
 
     let getroutes_route = getroutes.routes[0].path.clone();
-    match failcode {
-        val if val == ErrorCode::UnknownNextPeer as u64 => {
+    let code = ErrorCode::from_u64(failcode);
+    match code {
+        Some(ErrorCode::UnknownNextPeer) => {
             log::info!("Probe success");
         }
-        val if val == ErrorCode::IncorrectOrUnknownPaymentDetails as u64 => {
+        Some(ErrorCode::IncorrectOrUnknownPaymentDetails) => {
             log::info!("Probe success, a node that runs testpay");
         }
-        val if val == ErrorCode::TemporaryChannelFailure as u64 => {
+        Some(ErrorCode::TemporaryChannelFailure) => {
             log::info!("Probe failed, possibly liquidity constraints");
             match knowledge_bad_channel(p.clone(), erring_index, &sendpay_route, &getroutes_route)
                 .await
@@ -438,7 +455,7 @@ async fn testpayment(
                 _ => {}
             }
         }
-        val if val == ErrorCode::FeeInsufficient as u64 => {
+        Some(ErrorCode::FeeInsufficient) => {
             log::info!("Probe failed, fee_insufficient");
             // We could have taken the raw message from waitsendpay to update the channel fees, but
             // this is simpler.
@@ -449,7 +466,7 @@ async fn testpayment(
                 _ => {}
             }
         }
-        _ => {
+        None => {
             log::warn!("Unrecognized error code: {failcode}");
         }
     };
