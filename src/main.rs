@@ -377,6 +377,12 @@ async fn send_probe(
         .call_typed(&getroutes_req)
         .await
         .map_err(|e| anyhow!("getroutes failed: {e}"))?;
+    if getroutes.routes.len() != 1 {
+        return Err(anyhow!(
+            "Expecting getroutes to return exactly one route, got {} instead.",
+            getroutes.routes.len()
+        ));
+    }
 
     // FIXME: maybe it would be better to keep byte types and then convert to specific library
     // types when needed
