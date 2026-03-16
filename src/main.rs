@@ -546,6 +546,32 @@ async fn testpayment(
     )
 }
 
+async fn probe_loop(
+    p: cln_plugin::Plugin<LnRadar>,
+    test_payment: &TestPayment,
+) -> Result<ProbeResult> {
+    let mut groupid: u64 = 0;
+    loop {
+        groupid += 1;
+        let results = send_probe(p.clone(), &test_payment, groupid).await?;
+        match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("Failed to update knowledge: {e}");
+            }
+        };
+        match results.failcode {
+            ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
+                return Ok(results);
+            }
+            _ => {
+                log::info!("Probe failed");
+                continue;
+            }
+        };
+    }
+}
+
 async fn testpayment_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -569,27 +595,16 @@ async fn testpayment_loop(
     let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
         .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
 
-    let mut groupid: u64 = 0;
-    loop {
-        groupid += 1;
-        let results = send_probe(p.clone(), &test_payment, groupid).await?;
-        match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
-            Ok(_) => {}
-            Err(e) => {
-                log::warn!("Failed to update knowledge: {e}");
-            }
-        };
-        match results.failcode {
-            ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
-                log::info!("Probe success");
-                return Ok(
-                    json!({"getroutes": results.getroutes_path, "sendpay": results.sendpay, "waitsendpay": results.waitsendpay}),
-                );
-            }
-            _ => {
-                log::info!("Probe failed");
-                continue;
-            }
-        };
-    }
+    let results = tokio::select! {
+        r = probe_loop(p, &test_payment) => {
+            r?
+        },
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+            return Err(anyhow!("time out while waiting for probe loop to finish"));
+        }
+    };
+    Ok(json!({
+        "getroutes": results.getroutes_path,
+        "sendpay": results.sendpay,
+        "waitsendpay": results.waitsendpay}))
 }
