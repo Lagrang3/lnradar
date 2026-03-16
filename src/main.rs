@@ -245,6 +245,7 @@ async fn knowledge_good_channels(
     erring_index: usize,
     sendpay_path: &Vec<SendpayRoute>,
     getroutes_path: &Vec<GetroutesRoutesPath>,
+    layer: &str,
 ) -> Result<()> {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
@@ -257,7 +258,7 @@ async fn knowledge_good_channels(
         &getroutes_path[..erring_index],
     ) {
         let askrene_req = AskreneinformchannelRequest {
-            layer: LNRADAR_LAYER.to_string(),
+            layer: layer.to_string(),
             amount_msat: Some(sp_hop.amount_msat),
             short_channel_id_dir: gr_hop.short_channel_id_dir,
             inform: Some(AskreneinformchannelInform::UNCONSTRAINED),
@@ -275,6 +276,7 @@ async fn knowledge_bad_channel(
     erring_index: usize,
     sendpay_path: &Vec<SendpayRoute>,
     getroutes_path: &Vec<GetroutesRoutesPath>,
+    layer: &str,
 ) -> Result<()> {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
@@ -283,7 +285,7 @@ async fn knowledge_bad_channel(
         return Err(anyhow!("erring_index is out of bounds"));
     }
     let askrene_req = AskreneinformchannelRequest {
-        layer: LNRADAR_LAYER.to_string(),
+        layer: layer.to_string(),
         amount_msat: Some(sendpay_path[erring_index].amount_msat),
         short_channel_id_dir: getroutes_path[erring_index].short_channel_id_dir,
         inform: Some(AskreneinformchannelInform::CONSTRAINED),
@@ -299,6 +301,7 @@ async fn knowledge_disable_channel(
     p: cln_plugin::Plugin<LnRadar>,
     erring_index: usize,
     getroutes_path: &Vec<GetroutesRoutesPath>,
+    layer: &str,
 ) -> Result<()> {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
@@ -313,7 +316,7 @@ async fn knowledge_disable_channel(
             getroutes_path[erring_index]
         ))?;
     let askrene_req = AskreneupdatechannelRequest {
-        layer: LNRADAR_LAYER.to_string(),
+        layer: layer.to_string(),
         short_channel_id_dir: scidd,
         enabled: Some(false),
         cltv_expiry_delta: None,
@@ -446,6 +449,50 @@ async fn send_probe(
     })
 }
 
+async fn update_knowledge(
+    p: cln_plugin::Plugin<LnRadar>,
+    results: &ProbeResult,
+    layer: &str,
+) -> Result<()> {
+    match results.failcode {
+        ErrorCode::TemporaryChannelFailure => {
+            knowledge_bad_channel(
+                p.clone(),
+                results.erring_index,
+                &results.sendpay_route,
+                &results.getroutes_path,
+                layer,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to update knowledge fro failed channel: {e}"))?;
+        }
+        ErrorCode::FeeInsufficient => {
+            // We could have taken the raw message from waitsendpay to update the channel fees, but
+            // this is simpler.
+            knowledge_disable_channel(
+                p.clone(),
+                results.erring_index,
+                &results.getroutes_path,
+                layer,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to disable bad channel: {e}"))?;
+        }
+        _ => {}
+    };
+
+    knowledge_good_channels(
+        p.clone(),
+        results.erring_index,
+        &results.sendpay_route,
+        &results.getroutes_path,
+        layer,
+    )
+    .await
+    .map_err(|e| anyhow!("failed to update knowledge for good channels: {e}"))?;
+    Ok(())
+}
+
 async fn testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -471,6 +518,13 @@ async fn testpayment(
 
     let results = send_probe(p.clone(), test_payment).await?;
 
+    match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("Failed to update knowledge: {e}");
+        }
+    };
+
     match results.failcode {
         ErrorCode::UnknownNextPeer => {
             log::info!("Probe success");
@@ -478,55 +532,10 @@ async fn testpayment(
         ErrorCode::IncorrectOrUnknownPaymentDetails => {
             log::info!("Probe success, a node that runs testpay");
         }
-        ErrorCode::TemporaryChannelFailure => {
-            log::info!("Probe failed, possibly liquidity constraints");
-            match knowledge_bad_channel(
-                p.clone(),
-                results.erring_index,
-                &results.sendpay_route,
-                &results.getroutes_path,
-            )
-            .await
-            {
-                Err(e) => {
-                    log::warn!("failed to update knowledge for failed channel: {e}");
-                }
-                _ => {}
-            }
-        }
-        ErrorCode::FeeInsufficient => {
-            log::info!("Probe failed, fee_insufficient");
-            // We could have taken the raw message from waitsendpay to update the channel fees, but
-            // this is simpler.
-            match knowledge_disable_channel(
-                p.clone(),
-                results.erring_index,
-                &results.getroutes_path,
-            )
-            .await
-            {
-                Err(e) => {
-                    log::warn!("failed to disable bad channel: {e}");
-                }
-                _ => {}
-            }
+        _ => {
+            log::info!("Probe failed");
         }
     };
-
-    match knowledge_good_channels(
-        p.clone(),
-        results.erring_index,
-        &results.sendpay_route,
-        &results.getroutes_path,
-    )
-    .await
-    {
-        Err(e) => {
-            log::warn!("failed to update knowledge for good channels: {e}");
-        }
-        _ => {}
-    }
-
     Ok(
         json!({"getroutes": results.getroutes_path, "sendpay": results.sendpay, "waitsendpay": results.waitsendpay}),
     )
