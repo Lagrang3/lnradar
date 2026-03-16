@@ -7,9 +7,9 @@ use cln_rpc::model::requests::{
     AskreneinformchannelRequest, AskreneupdatechannelRequest, GetinfoRequest, GetroutesRequest,
     SendpayRequest, SendpayRoute, WaitsendpayRequest,
 };
-use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
+use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath, SendpayResponse};
 use cln_rpc::primitives::Amount;
-use cln_rpc::ClnRpc;
+use cln_rpc::{ClnRpc, RpcError};
 use lightning_invoice::Currency;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -329,29 +329,20 @@ async fn knowledge_disable_channel(
     Ok(())
 }
 
-async fn testpayment(
+struct ProbeResult {
+    getroutes_path: Vec<GetroutesRoutesPath>,
+    sendpay_route: Vec<SendpayRoute>,
+    sendpay: SendpayResponse,
+    waitsendpay: RpcError,
+    failcode: ErrorCode,
+    erring_index: usize,
+}
+
+async fn send_probe(
     p: cln_plugin::Plugin<LnRadar>,
-    args: Value,
-) -> Result<Value, cln_plugin::Error> {
+    test_payment: TestPayment,
+) -> Result<ProbeResult> {
     let lnradar = p.state();
-
-    // we use map_err instead of context because the plugin error message only contains the context
-    // and not the details of the error
-    let amount_msat = args["amount_msat"]
-        .as_u64()
-        .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
-    let destination = PublicKey::from_value(&args["destination"])
-        .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
-
-    log::trace!(
-        "testpayment called with amount_msat: {} and destination: {}",
-        args["amount_msat"],
-        args["destination"]
-    );
-
-    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
-        .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
-
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin {e}"))?;
@@ -373,7 +364,7 @@ async fn testpayment(
         maxparts: Some(1),
         final_cltv: Some(test_payment.prev_delay().into()),
     };
-    let getroutes = rpc
+    let mut getroutes = rpc
         .call_typed(&getroutes_req)
         .await
         .map_err(|e| anyhow!("getroutes failed: {e}"))?;
@@ -389,6 +380,7 @@ async fn testpayment(
     let groupid = 1;
     let mut sendpay_route = convert_routes(&getroutes.routes[0])
         .map_err(|e| anyhow!("couldn't convert routes types: {e}"))?;
+    let getroutes_path = getroutes.routes.remove(0).path;
     sendpay_route.push(test_payment.final_hop());
 
     let sendpay_req = SendpayRequest {
@@ -423,10 +415,10 @@ async fn testpayment(
         .ok_or(anyhow!("unexpected waitsendpay success"))?;
 
     let data = waitsendpay
-        .clone()
         .data
+        .clone()
         .ok_or(anyhow!("data is not present in waitsendpay error"))?;
-    let failcode = data["failcode"]
+    let raw_failcode = data["failcode"]
         .as_u64()
         .ok_or(anyhow!("can't read failcode from waitsendpay response"))?;
     let erring_index: usize = data["erring_index"]
@@ -435,19 +427,66 @@ async fn testpayment(
         .try_into()
         .context("failed to convert erring_index into usize")?;
 
-    let getroutes_route = getroutes.routes[0].path.clone();
-    let code = ErrorCode::from_u64(failcode);
-    match code {
-        Some(ErrorCode::UnknownNextPeer) => {
+    let failcode = match ErrorCode::from_u64(raw_failcode) {
+        Some(e) => e,
+        None => {
+            return Err(anyhow!(
+                "Unrecognized error code from waitsendpay: {waitsendpay}"
+            ));
+        }
+    };
+
+    Ok(ProbeResult {
+        getroutes_path,
+        sendpay_route,
+        sendpay,
+        waitsendpay,
+        failcode,
+        erring_index,
+    })
+}
+
+async fn testpayment(
+    p: cln_plugin::Plugin<LnRadar>,
+    args: Value,
+) -> Result<Value, cln_plugin::Error> {
+    let lnradar = p.state();
+
+    // we use map_err instead of context because the plugin error message only contains the context
+    // and not the details of the error
+    let amount_msat = args["amount_msat"]
+        .as_u64()
+        .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
+    let destination = PublicKey::from_value(&args["destination"])
+        .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
+
+    log::trace!(
+        "testpayment called with amount_msat: {} and destination: {}",
+        args["amount_msat"],
+        args["destination"]
+    );
+
+    let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
+        .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
+
+    let results = send_probe(p.clone(), test_payment).await?;
+
+    match results.failcode {
+        ErrorCode::UnknownNextPeer => {
             log::info!("Probe success");
         }
-        Some(ErrorCode::IncorrectOrUnknownPaymentDetails) => {
+        ErrorCode::IncorrectOrUnknownPaymentDetails => {
             log::info!("Probe success, a node that runs testpay");
         }
-        Some(ErrorCode::TemporaryChannelFailure) => {
+        ErrorCode::TemporaryChannelFailure => {
             log::info!("Probe failed, possibly liquidity constraints");
-            match knowledge_bad_channel(p.clone(), erring_index, &sendpay_route, &getroutes_route)
-                .await
+            match knowledge_bad_channel(
+                p.clone(),
+                results.erring_index,
+                &results.sendpay_route,
+                &results.getroutes_path,
+            )
+            .await
             {
                 Err(e) => {
                     log::warn!("failed to update knowledge for failed channel: {e}");
@@ -455,28 +494,40 @@ async fn testpayment(
                 _ => {}
             }
         }
-        Some(ErrorCode::FeeInsufficient) => {
+        ErrorCode::FeeInsufficient => {
             log::info!("Probe failed, fee_insufficient");
             // We could have taken the raw message from waitsendpay to update the channel fees, but
             // this is simpler.
-            match knowledge_disable_channel(p.clone(), erring_index, &getroutes_route).await {
+            match knowledge_disable_channel(
+                p.clone(),
+                results.erring_index,
+                &results.getroutes_path,
+            )
+            .await
+            {
                 Err(e) => {
                     log::warn!("failed to disable bad channel: {e}");
                 }
                 _ => {}
             }
         }
-        None => {
-            log::warn!("Unrecognized error code: {failcode}");
-        }
     };
 
-    match knowledge_good_channels(p.clone(), erring_index, &sendpay_route, &getroutes_route).await {
+    match knowledge_good_channels(
+        p.clone(),
+        results.erring_index,
+        &results.sendpay_route,
+        &results.getroutes_path,
+    )
+    .await
+    {
         Err(e) => {
             log::warn!("failed to update knowledge for good channels: {e}");
         }
         _ => {}
     }
 
-    Ok(json!({"getroutes": getroutes, "sendpay": sendpay, "waitsendpay": waitsendpay}))
+    Ok(
+        json!({"getroutes": results.getroutes_path, "sendpay": results.sendpay, "waitsendpay": results.waitsendpay}),
+    )
 }
