@@ -15,6 +15,7 @@ use rand::seq::IndexedRandom;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::str::FromStr;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 mod primitives;
@@ -31,6 +32,10 @@ use crate::results::ProbeResult;
 // We remove knowledge older than 1 day.
 const LNRADAR_LAYER: &str = "lnradar";
 const LNRADAR_AGE_TIME: u64 = 86400;
+// maximum number of concurrent probes
+const LNRADAR_MAX_CONCURRENT_PROBES: usize = 10;
+
+static SEM: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
 
 #[derive(Debug, Clone)]
 struct LnRadar {
@@ -329,6 +334,13 @@ async fn send_probe(
     test_payment: &TestPayment,
     groupid: u64,
 ) -> Result<ProbeResult> {
+    // Only a limited number of probes is allowed to run concurrently, due to the limited available
+    // number of HTLC slots in local channels.
+    let _ = SEM
+        .acquire()
+        .await
+        .map_err(|e| anyhow!("failed to acquire semaphore: {e}"))?;
+
     let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
@@ -619,7 +631,6 @@ async fn testnetwork_loop(
         let plugin = p.clone();
         let nodeid = n.clone();
         set.spawn(async move {
-            // FIXME: limit the number of concurrent probes
             let lnradar = plugin.state();
             let destination: PublicKey = nodeid.into();
             let test_payment =
