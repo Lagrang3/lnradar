@@ -34,10 +34,14 @@ const LNRADAR_LAYER: &str = "lnradar";
 const LNRADAR_AGE_TIME: u64 = 86400;
 // maximum number of concurrent probes
 const LNRADAR_MAX_CONCURRENT_PROBES: usize = 10;
+// maximum number of concurrent knowledge updates, every knowledge update make rpc requests to
+// lightningd's unix domain socket
+const LNRADAR_MAX_CONCURRENT_UPDATES: usize = 20;
 // timeout for probes
 const LNRADAR_DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-static SEM: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
+static SEM_PROBES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
+static SEM_UPDATES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_UPDATES);
 
 #[derive(Debug, Clone)]
 struct LnRadar {
@@ -338,10 +342,10 @@ async fn send_probe(
 ) -> Result<ProbeResult> {
     // Only a limited number of probes is allowed to run concurrently, due to the limited available
     // number of HTLC slots in local channels.
-    let _ = SEM
+    let _ = SEM_PROBES
         .acquire()
         .await
-        .map_err(|e| anyhow!("failed to acquire semaphore: {e}"))?;
+        .map_err(|e| anyhow!("failed to acquire probe semaphore: {e}"))?;
 
     let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
@@ -457,6 +461,10 @@ async fn update_knowledge(
     results: &ProbeResult,
     layer: &str,
 ) -> Result<()> {
+    let _ = SEM_UPDATES
+        .acquire()
+        .await
+        .map_err(|e| anyhow!("failed to acquire update semaphore: {e}"))?;
     match results.failcode {
         ErrorCode::TemporaryChannelFailure => {
             knowledge_bad_channel(
