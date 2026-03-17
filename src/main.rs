@@ -5,15 +5,17 @@ use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
     AskreneinformchannelRequest, AskreneupdatechannelRequest, GetinfoRequest, GetroutesRequest,
-    SendpayRequest, SendpayRoute, WaitsendpayRequest,
+    ListnodesRequest, SendpayRequest, SendpayRoute, WaitsendpayRequest,
 };
 use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
 use cln_rpc::primitives::Amount;
 use cln_rpc::ClnRpc;
 use lightning_invoice::Currency;
+use rand::seq::IndexedRandom;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::str::FromStr;
+use tokio::task::JoinSet;
 
 mod primitives;
 use crate::primitives::{FromJson, PublicKey, SecretKey};
@@ -83,6 +85,11 @@ async fn main() -> anyhow::Result<()> {
             "testpayment-loop",
             "Command to try different probe paths to a destination",
             testpayment_loop,
+        )
+        .rpcmethod(
+            "testnetwork-loop",
+            "Command to try different probe paths to random destinations",
+            testnetwork_loop,
         )
         .dynamic()
         .configure()
@@ -578,5 +585,59 @@ async fn testpayment_loop(
             return Err(anyhow!("time out while waiting for probe loop to finish"));
         }
     };
+    Ok(json!(results))
+}
+
+async fn testnetwork_loop(
+    p: cln_plugin::Plugin<LnRadar>,
+    args: Value,
+) -> Result<Value, cln_plugin::Error> {
+    let amount_msat = args["amount_msat"]
+        .as_u64()
+        .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
+    let n = args["num_destinations"].as_u64().unwrap_or(10);
+
+    log::trace!(
+        "testpayment called with amount_msat: {} and num_destinations: {}",
+        args["amount_msat"],
+        args["num_destinations"]
+    );
+
+    let mut rpc = ClnRpc::from_plugin(&p).await?;
+
+    let nodes: Vec<_> = rpc.call_typed(&ListnodesRequest { id: None }).await?.nodes;
+    let mut rng: rand::rngs::StdRng = rand::make_rng();
+    let nodes: Vec<_> = nodes
+        .sample(&mut rng, n as usize)
+        .map(|x| x.nodeid.clone())
+        .collect();
+
+    let mut set = JoinSet::new();
+    let mut results = vec![];
+
+    for n in nodes {
+        let plugin = p.clone();
+        let nodeid = n.clone();
+        set.spawn(async move {
+            // FIXME: limit the number of concurrent probes
+            let lnradar = plugin.state();
+            let destination: PublicKey = nodeid.into();
+            let test_payment =
+                TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
+                    .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
+            // FIXME: do it with timeout
+            probe_loop(plugin, &test_payment).await
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        // FIXME: add node info here as well
+        let r = match res? {
+            Ok(_) => json!({"status": "success"}),
+            Err(e) => json!({"status": "failed", "message": e.to_string()}),
+        };
+        results.push(r);
+    }
+
     Ok(json!(results))
 }
