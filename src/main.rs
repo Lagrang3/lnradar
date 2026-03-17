@@ -7,9 +7,9 @@ use cln_rpc::model::requests::{
     AskreneinformchannelRequest, AskreneupdatechannelRequest, GetinfoRequest, GetroutesRequest,
     SendpayRequest, SendpayRoute, WaitsendpayRequest,
 };
-use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath, SendpayResponse};
+use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
 use cln_rpc::primitives::Amount;
-use cln_rpc::{ClnRpc, RpcError};
+use cln_rpc::ClnRpc;
 use lightning_invoice::Currency;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -21,34 +21,14 @@ use crate::primitives::{FromJson, PublicKey, SecretKey};
 mod testpayment;
 use crate::testpayment::TestPayment;
 
+mod results;
+use crate::results::ErrorCode;
+use crate::results::ProbeResult;
+
 // The default age time of xpay layer set to 1 hour is too small.
 // We remove knowledge older than 1 day.
 const LNRADAR_LAYER: &str = "lnradar";
 const LNRADAR_AGE_TIME: u64 = 86400;
-
-#[repr(u64)]
-enum ErrorCode {
-    UnknownNextPeer = 0x400a,
-    IncorrectOrUnknownPaymentDetails = 0x400f,
-    TemporaryChannelFailure = 0x1007,
-    FeeInsufficient = 0x100c,
-}
-
-impl ErrorCode {
-    pub fn from_u64(n: u64) -> Option<Self> {
-        match n {
-            n if n == ErrorCode::UnknownNextPeer as u64 => Some(ErrorCode::UnknownNextPeer),
-            n if n == ErrorCode::IncorrectOrUnknownPaymentDetails as u64 => {
-                Some(ErrorCode::IncorrectOrUnknownPaymentDetails)
-            }
-            n if n == ErrorCode::TemporaryChannelFailure as u64 => {
-                Some(ErrorCode::TemporaryChannelFailure)
-            }
-            n if n == ErrorCode::FeeInsufficient as u64 => Some(ErrorCode::FeeInsufficient),
-            _ => None,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct LnRadar {
@@ -337,15 +317,6 @@ async fn knowledge_disable_channel(
     Ok(())
 }
 
-struct ProbeResult {
-    getroutes_path: Vec<GetroutesRoutesPath>,
-    sendpay_route: Vec<SendpayRoute>,
-    sendpay: SendpayResponse,
-    waitsendpay: RpcError,
-    failcode: ErrorCode,
-    erring_index: usize,
-}
-
 async fn send_probe(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
@@ -547,9 +518,7 @@ async fn testpayment(
             log::info!("Probe failed");
         }
     };
-    Ok(
-        json!({"getroutes": results.getroutes_path, "sendpay": results.sendpay, "waitsendpay": results.waitsendpay}),
-    )
+    Ok(json!(results))
 }
 
 async fn probe_loop(
@@ -609,8 +578,5 @@ async fn testpayment_loop(
             return Err(anyhow!("time out while waiting for probe loop to finish"));
         }
     };
-    Ok(json!({
-        "getroutes": results.getroutes_path,
-        "sendpay": results.sendpay,
-        "waitsendpay": results.waitsendpay}))
+    Ok(json!(results))
 }

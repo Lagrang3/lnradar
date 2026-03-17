@@ -467,6 +467,7 @@ dependencies = [
  "lightning-types",
  "log",
  "rand",
+ "serde",
  "serde_json",
  "tokio",
 ]
