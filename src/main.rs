@@ -37,15 +37,11 @@ const LNRADAR_LAYER: &str = "lnradar";
 // Time in seconds after which we consider knowledge to be obsolete.
 const LNRADAR_AGE_TIME_SECS: u64 = 86400;
 // maximum number of concurrent probes
-const LNRADAR_MAX_CONCURRENT_PROBES: usize = 10;
-// maximum number of concurrent knowledge updates, every knowledge update make rpc requests to
-// lightningd's unix domain socket
-const LNRADAR_MAX_CONCURRENT_UPDATES: usize = 20;
+const LNRADAR_MAX_CONCURRENT_PROBES: usize = 5;
 // timeout for probes
 const LNRADAR_DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 static SEM_PROBES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
-static SEM_UPDATES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_UPDATES);
 
 #[derive(Clone)]
 struct LnRadar {
@@ -446,11 +442,6 @@ async fn send_probe(
 ) -> Result<ProbeResult> {
     // Only a limited number of probes is allowed to run concurrently, due to the limited available
     // number of HTLC slots in local channels.
-    let _ = SEM_PROBES
-        .acquire()
-        .await
-        .map_err(|e| anyhow!("failed to acquire probe semaphore: {e}"))?;
-
     let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
@@ -565,10 +556,6 @@ async fn update_knowledge(
     results: &ProbeResult,
     layer: &str,
 ) -> Result<()> {
-    let _ = SEM_UPDATES
-        .acquire()
-        .await
-        .map_err(|e| anyhow!("failed to acquire update semaphore: {e}"))?;
     match results.failcode {
         ErrorCode::TemporaryChannelFailure => {
             knowledge_bad_channel(
@@ -680,6 +667,27 @@ async fn probe_loop(
     }
 }
 
+async fn probe_loop_timeout(
+    p: cln_plugin::Plugin<LnRadar>,
+    test_payment: &TestPayment,
+    timeout: tokio::time::Duration,
+) -> Result<ProbeResult> {
+    let _probe = SEM_PROBES
+        .acquire()
+        .await
+        .map_err(|e| anyhow!("failed to acquire probe semaphore: {e}"))?;
+    let result = tokio::select! {
+        r = probe_loop(p, &test_payment) => {
+            r
+        },
+        _ = tokio::time::sleep(timeout) => {
+            Err(anyhow!("time out while waiting for probe loop to finish"))
+        }
+    };
+    drop(_probe);
+    result
+}
+
 async fn testpayment_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -703,15 +711,13 @@ async fn testpayment_loop(
     let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
         .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
 
-    let results = tokio::select! {
-        r = probe_loop(p, &test_payment) => {
-            r?
-        },
-        _ = tokio::time::sleep(tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS)) => {
-            return Err(anyhow!("time out while waiting for probe loop to finish"));
-        }
-    };
-    Ok(json!(results))
+    let r = probe_loop_timeout(
+        p,
+        &test_payment,
+        tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS),
+    )
+    .await?;
+    Ok(json!(r))
 }
 
 async fn testnetwork_loop(
@@ -750,14 +756,12 @@ async fn testnetwork_loop(
             let test_payment =
                 TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
                     .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
-            tokio::select! {
-                r = probe_loop(plugin, &test_payment) => {
-                    r
-                },
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS)) => {
-                    Err(anyhow!("time out while waiting for probe loop to finish"))
-                }
-            }
+            probe_loop_timeout(
+                plugin,
+                &test_payment,
+                tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS),
+            )
+            .await
         });
     }
 
