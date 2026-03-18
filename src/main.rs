@@ -4,7 +4,7 @@ use bitcoin::network::Network;
 use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
-    AskreneinformchannelRequest, AskreneremovelayerRequest, AskreneupdatechannelRequest,
+    AskreneinformchannelRequest, AskrenelistlayersRequest, AskreneupdatechannelRequest,
     GetinfoRequest, GetroutesRequest, ListnodesRequest, SendpayRequest, SendpayRoute,
     WaitsendpayRequest,
 };
@@ -138,29 +138,33 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .expect("failed to fetch an rpc channel from plugin");
+
     match rpc
-        .call_typed(&AskreneremovelayerRequest {
-            layer: LNRADAR_LAYER.to_string(),
+        .call_typed(&AskrenelistlayersRequest {
+            layer: Some(LNRADAR_LAYER.to_string()),
         })
         .await
     {
-        Ok(_) => {
-            log::info!("Found \"{LNRADAR_LAYER}\", removed for cleaning.");
+        Err(_) => {
+            // layer does not exist
+
+            match rpc
+                .call_typed(&AskrenecreatelayerRequest {
+                    layer: LNRADAR_LAYER.to_string(),
+                    persistent: Some(true),
+                })
+                .await
+            {
+                Ok(_) => {
+                    log::info!("Created layer \"{LNRADAR_LAYER}\"");
+                }
+                Err(e) => {
+                    log::warn!("Failed to create layer \"{LNRADAR_LAYER}\": {e}");
+                }
+            }
         }
-        Err(_) => {}
-    }
-    match rpc
-        .call_typed(&AskrenecreatelayerRequest {
-            layer: LNRADAR_LAYER.to_string(),
-            persistent: None,
-        })
-        .await
-    {
         Ok(_) => {
-            log::info!("Created layer \"{LNRADAR_LAYER}\"");
-        }
-        Err(e) => {
-            log::warn!("Failed to create layer \"{LNRADAR_LAYER}\": {e}");
+            // layer already exists
         }
     }
     loop {
