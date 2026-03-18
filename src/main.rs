@@ -9,18 +9,20 @@ use cln_rpc::model::requests::{
     WaitsendpayRequest,
 };
 use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
-use cln_rpc::primitives::Amount;
+use cln_rpc::primitives::{Amount, ShortChannelIdDir};
 use cln_rpc::ClnRpc;
 use lightning_invoice::Currency;
 use rand::seq::IndexedRandom;
 use serde_json::{json, Value};
+use std::collections::BinaryHeap;
 use std::path::Path;
 use std::str::FromStr;
-use tokio::sync::Semaphore;
+use std::sync::Arc;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 mod primitives;
-use crate::primitives::{FromJson, PublicKey, SecretKey};
+use crate::primitives::{DisabledChannel, FromJson, PublicKey, SecretKey};
 
 mod testpayment;
 use crate::testpayment::TestPayment;
@@ -32,7 +34,8 @@ use crate::results::ProbeResult;
 // The default age time of xpay layer set to 1 hour is too small.
 // We remove knowledge older than 1 day.
 const LNRADAR_LAYER: &str = "lnradar";
-const LNRADAR_AGE_TIME: u64 = 86400;
+// Time in seconds after which we consider knowledge to be obsolete.
+const LNRADAR_AGE_TIME_SECS: u64 = 86400;
 // maximum number of concurrent probes
 const LNRADAR_MAX_CONCURRENT_PROBES: usize = 10;
 // maximum number of concurrent knowledge updates, every knowledge update make rpc requests to
@@ -44,11 +47,12 @@ const LNRADAR_DEFAULT_TIMEOUT_SECS: u64 = 60;
 static SEM_PROBES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
 static SEM_UPDATES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_UPDATES);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct LnRadar {
     pub currency: Currency,
     pub private_key: SecretKey,
     pub nodeid: PublicKey,
+    pub disabled: Arc<Mutex<BinaryHeap<DisabledChannel>>>,
 }
 
 trait FromPlugin<P> {
@@ -122,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         currency: network.into(),
         private_key: private_key,
         nodeid: nodeid,
+        disabled: Arc::new(Mutex::new(BinaryHeap::new())),
     };
     let plugin = plugin.start(state).await?;
 
@@ -165,7 +170,7 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
     loop {
         // every minute apply aging to layers
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        match age_layer(p.clone(), LNRADAR_LAYER, LNRADAR_AGE_TIME).await {
+        match age_layer(p.clone(), LNRADAR_LAYER, LNRADAR_AGE_TIME_SECS).await {
             Ok(_) => {
                 log::info!("Aged layer: {LNRADAR_LAYER}");
             }
@@ -173,7 +178,49 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
                 log::warn!("Failed to age layer: {e}");
             }
         }
+
+        match age_disabled(p.clone(), LNRADAR_LAYER, LNRADAR_AGE_TIME_SECS).await {
+            Ok(n) => {
+                log::info!("Re-enabled {n} channels.");
+            }
+            Err(e) => {
+                log::warn!("Failed to re-enable channels on layer \"{LNRADAR_LAYER}\": {e}");
+            }
+        }
     }
+}
+
+async fn age_disabled(
+    p: cln_plugin::Plugin<LnRadar>,
+    layer: &str,
+    age_time_secs: u64,
+) -> Result<usize, cln_plugin::Error> {
+    let time_delta = std::time::Duration::from_secs(age_time_secs);
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(time_delta)
+        .ok_or(anyhow!("cutoff goes out of bounds"))?;
+    let mut disabled_heap = p.state().disabled.lock().await;
+    let mut n: usize = 0;
+    while let Some(chan) = disabled_heap.peek() {
+        if chan.time > cutoff {
+            break;
+        }
+
+        let scidd = chan.scidd.clone();
+        let scidd_str = serde_json::to_string(&scidd).unwrap_or_default();
+        match reenable_channel(p.clone(), scidd.clone(), layer).await {
+            Ok(_) => {
+                n += 1;
+                log::info!("re-enabed channel {scidd_str}");
+                disabled_heap.pop();
+            }
+            Err(e) => {
+                log::warn!("failed to re-enable channel {scidd_str}: {e}");
+                break;
+            }
+        }
+    }
+    Ok(n)
 }
 
 async fn age_layer(
@@ -314,27 +361,18 @@ async fn knowledge_bad_channel(
     Ok(())
 }
 
-async fn knowledge_disable_channel(
+async fn disable_channel(
     p: cln_plugin::Plugin<LnRadar>,
-    erring_index: usize,
-    getroutes_path: &Vec<GetroutesRoutesPath>,
+    scidd: ShortChannelIdDir,
     layer: &str,
 ) -> Result<()> {
+    let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
-    if getroutes_path.len() <= erring_index {
-        return Err(anyhow!("erring_index is out of bounds"));
-    }
-    let scidd = getroutes_path[erring_index]
-        .short_channel_id_dir
-        .ok_or(anyhow!(
-            "missing short_channel_id_dir in hop {:?}",
-            getroutes_path[erring_index]
-        ))?;
     let askrene_req = AskreneupdatechannelRequest {
         layer: layer.to_string(),
-        short_channel_id_dir: scidd,
+        short_channel_id_dir: scidd.clone(),
         enabled: Some(false),
         cltv_expiry_delta: None,
         fee_base_msat: None,
@@ -342,11 +380,63 @@ async fn knowledge_disable_channel(
         htlc_minimum_msat: None,
         htlc_maximum_msat: None,
     };
+
+    let mut disabled_heap = lnradar.disabled.lock().await;
+    disabled_heap.push(DisabledChannel {
+        scidd: scidd,
+        time: std::time::SystemTime::now(),
+    });
+
     let _ = rpc
         .call_typed(&askrene_req)
         .await
         .map_err(|e| anyhow!("askrene-update-channel failed: {e}"))?;
+    log::debug!("Disabled channel {scidd}");
     Ok(())
+}
+
+async fn reenable_channel(
+    p: cln_plugin::Plugin<LnRadar>,
+    scidd: ShortChannelIdDir,
+    layer: &str,
+) -> Result<()> {
+    let mut rpc = ClnRpc::from_plugin(&p)
+        .await
+        .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
+    let askrene_req = AskreneupdatechannelRequest {
+        layer: layer.to_string(),
+        short_channel_id_dir: scidd.clone(),
+        enabled: Some(true),
+        cltv_expiry_delta: None,
+        fee_base_msat: None,
+        fee_proportional_millionths: None,
+        htlc_minimum_msat: None,
+        htlc_maximum_msat: None,
+    };
+    // FIXME: this is not enough, we should be able to remove entries.
+    let _ = rpc
+        .call_typed(&askrene_req)
+        .await
+        .map_err(|e| anyhow!("askrene-update-channel failed: {e}"))?;
+
+    Ok(())
+}
+
+async fn knowledge_disable_channel(
+    p: cln_plugin::Plugin<LnRadar>,
+    erring_index: usize,
+    getroutes_path: &Vec<GetroutesRoutesPath>,
+    layer: &str,
+) -> Result<()> {
+    let scidd = getroutes_path
+        .get(erring_index)
+        .ok_or(anyhow!("erring_index is out of bounds"))?
+        .short_channel_id_dir
+        .ok_or(anyhow!(
+            "missing short_channel_id_dir in path {getroutes_path:?} at index {erring_index}"
+        ))?;
+
+    disable_channel(p, scidd, layer).await
 }
 
 async fn send_probe(

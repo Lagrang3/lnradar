@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use bitcoin::secp256k1::Secp256k1;
 use serde_json::Value;
+use std::cmp::Ordering;
 
 // Incompatible versions of the bitcoin library for cln_rpc and lightning crates makes it
 // impossible to interoperably use a single PublicKey struct here.
@@ -75,5 +76,36 @@ impl FromJson for PublicKey {
             .map_err(|e| anyhow!("failed converting string to hex: {e}"))?;
         PublicKey::from_byte_array(pk)
             .map_err(|e| anyhow!("failed converting hex to PublicKey: {e}"))
+    }
+}
+
+// A struct to keep track of disabled channels, because askrene does not age disabled channels
+// knowledge.
+#[derive(Debug)]
+pub struct DisabledChannel {
+    pub scidd: cln_rpc::primitives::ShortChannelIdDir,
+    pub time: std::time::SystemTime,
+}
+
+impl PartialEq for DisabledChannel {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time && self.scidd == other.scidd
+    }
+}
+
+impl Eq for DisabledChannel {}
+
+impl Ord for DisabledChannel {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match other.time.cmp(&self.time) {
+            Ordering::Equal => self.scidd.cmp(&other.scidd),
+            o => o,
+        }
+    }
+}
+
+impl PartialOrd for DisabledChannel {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
