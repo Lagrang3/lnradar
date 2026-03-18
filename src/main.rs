@@ -4,8 +4,9 @@ use bitcoin::network::Network;
 use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
-    AskreneinformchannelRequest, AskreneupdatechannelRequest, GetinfoRequest, GetroutesRequest,
-    ListnodesRequest, SendpayRequest, SendpayRoute, WaitsendpayRequest,
+    AskreneinformchannelRequest, AskreneremovelayerRequest, AskreneupdatechannelRequest,
+    GetinfoRequest, GetroutesRequest, ListnodesRequest, SendpayRequest, SendpayRoute,
+    WaitsendpayRequest,
 };
 use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
 use cln_rpc::primitives::Amount;
@@ -136,16 +137,29 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .expect("failed to fetch an rpc channel from plugin");
-    let askrene_req = AskrenecreatelayerRequest {
-        layer: LNRADAR_LAYER.to_string(),
-        persistent: None,
-    };
-    match rpc.call_typed(&askrene_req).await {
+    match rpc
+        .call_typed(&AskreneremovelayerRequest {
+            layer: LNRADAR_LAYER.to_string(),
+        })
+        .await
+    {
         Ok(_) => {
-            log::info!("Created layer {LNRADAR_LAYER}");
+            log::info!("Found \"{LNRADAR_LAYER}\", removed for cleaning.");
+        }
+        Err(_) => {}
+    }
+    match rpc
+        .call_typed(&AskrenecreatelayerRequest {
+            layer: LNRADAR_LAYER.to_string(),
+            persistent: None,
+        })
+        .await
+    {
+        Ok(_) => {
+            log::info!("Created layer \"{LNRADAR_LAYER}\"");
         }
         Err(e) => {
-            log::warn!("Failed to create layer {LNRADAR_LAYER}: {e}");
+            log::warn!("Failed to create layer \"{LNRADAR_LAYER}\": {e}");
         }
     }
     loop {
