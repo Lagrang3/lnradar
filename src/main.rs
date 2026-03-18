@@ -650,6 +650,7 @@ async fn probe_loop(
     test_payment: &TestPayment,
 ) -> Result<ProbeResult> {
     let mut groupid: u64 = 0;
+    let nodeid_str = serde_json::to_string(&test_payment.prev_destination()).unwrap_or_default();
     loop {
         groupid += 1;
         let results = send_probe(p.clone(), &test_payment, groupid).await?;
@@ -661,10 +662,11 @@ async fn probe_loop(
         };
         match results.failcode {
             ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
+                log::info!("Probe success, nodeid={nodeid_str}");
                 return Ok(results);
             }
             _ => {
-                log::info!("Probe failed");
+                log::info!("Probe failed, nodeid={nodeid_str}");
                 continue;
             }
         };

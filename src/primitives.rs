@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use bitcoin::secp256k1::Secp256k1;
+use serde::Serialize;
 use serde_json::Value;
 use std::cmp::Ordering;
 
@@ -76,6 +77,16 @@ impl FromJson for PublicKey {
             .map_err(|e| anyhow!("failed converting string to hex: {e}"))?;
         PublicKey::from_byte_array(pk)
             .map_err(|e| anyhow!("failed converting hex to PublicKey: {e}"))
+    }
+}
+
+impl Serialize for PublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let pk_hex = hex::encode(self.0.serialize());
+        serializer.serialize_str(&pk_hex)
     }
 }
 
