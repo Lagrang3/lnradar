@@ -1,9 +1,8 @@
-use crate::primitives::{PublicKey, SecretKey};
+use crate::primitives::{Amount, PublicKey, SecretKey};
 use anyhow::{anyhow, Result};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::Secp256k1;
 use cln_rpc::model::requests::SendpayRoute;
-use cln_rpc::primitives::Amount;
 use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder};
 use lightning_types::payment::PaymentSecret;
 use lightning_types::routing::{RouteHint, RouteHintHop, RoutingFees};

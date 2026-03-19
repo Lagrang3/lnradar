@@ -1,3 +1,4 @@
+use crate::primitives::{Amount, ShortChannelIdDir};
 use anyhow::{anyhow, Context, Result};
 use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
@@ -9,7 +10,6 @@ use cln_rpc::model::requests::{
     WaitsendpayRequest,
 };
 use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
-use cln_rpc::primitives::{Amount, ShortChannelIdDir};
 use cln_rpc::ClnRpc;
 use lightning_invoice::Currency;
 use rand::seq::IndexedRandom;
