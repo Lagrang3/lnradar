@@ -8,7 +8,7 @@ use cln_rpc::model::requests::{
     GetinfoRequest, GetroutesRequest, ListnodesRequest, SendpayRequest, SendpayRoute,
     WaitsendpayRequest,
 };
-use cln_rpc::model::responses::{GetroutesRoutes, GetroutesRoutesPath};
+use cln_rpc::model::responses::GetroutesRoutes;
 use cln_rpc::ClnRpc;
 use lightning_invoice::Currency;
 use rand::seq::IndexedRandom;
@@ -28,7 +28,7 @@ use crate::testpayment::TestPayment;
 
 mod results;
 use crate::results::ErrorCode;
-use crate::results::ProbeResult;
+use crate::results::{ProbeAttempt, ProbeResult, RouteHop};
 
 // The default age time of xpay layer set to 1 hour is too small.
 // We remove knowledge older than 1 day.
@@ -268,7 +268,7 @@ async fn testinvoice(
     Ok(response)
 }
 
-fn convert_routes(r: &GetroutesRoutes) -> Result<Vec<SendpayRoute>> {
+fn convert_routes(r: &GetroutesRoutes) -> Result<(Vec<SendpayRoute>, Vec<RouteHop>)> {
     let sp_route: Result<Vec<SendpayRoute>> = r
         .path
         .iter()
@@ -297,7 +297,23 @@ fn convert_routes(r: &GetroutesRoutes) -> Result<Vec<SendpayRoute>> {
     sp_route[n - 1].delay = r
         .final_cltv
         .ok_or(anyhow!("routes {r:?} is missing the final_cltv"))?;
-    Ok(sp_route)
+
+    let path: Result<Vec<RouteHop>> = sp_route
+        .iter()
+        .zip(r.path.iter())
+        .map(|(sp_hop, gr_hop)| -> Result<RouteHop> {
+            let scidd = gr_hop
+                .short_channel_id_dir
+                .ok_or(anyhow!("hop {gr_hop:?} is missing a short_channel_id_dir"))?;
+            Ok(RouteHop {
+                short_channel_id_dir: scidd,
+                next_nodeid: gr_hop.next_node_id.into(),
+                amount: sp_hop.amount_msat,
+            })
+        })
+        .collect();
+    let path = path?;
+    Ok((sp_route, path))
 }
 
 // We can't just use getroutes_path because the amounts are wrong.
@@ -306,24 +322,20 @@ fn convert_routes(r: &GetroutesRoutes) -> Result<Vec<SendpayRoute>> {
 async fn knowledge_good_channels(
     p: cln_plugin::Plugin<LnRadar>,
     erring_index: usize,
-    sendpay_path: &Vec<SendpayRoute>,
-    getroutes_path: &Vec<GetroutesRoutesPath>,
+    path: &Vec<RouteHop>,
     layer: &str,
 ) -> Result<()> {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
-    if sendpay_path.len() < erring_index || getroutes_path.len() < erring_index {
+    if path.len() < erring_index {
         return Err(anyhow!("erring_index is out of bounds"));
     }
-    for (sp_hop, gr_hop) in std::iter::zip(
-        &sendpay_path[..erring_index],
-        &getroutes_path[..erring_index],
-    ) {
+    for hop in &path[..erring_index] {
         let askrene_req = AskreneinformchannelRequest {
             layer: layer.to_string(),
-            amount_msat: Some(sp_hop.amount_msat),
-            short_channel_id_dir: gr_hop.short_channel_id_dir,
+            amount_msat: Some(hop.amount),
+            short_channel_id_dir: Some(hop.short_channel_id_dir),
             inform: Some(AskreneinformchannelInform::UNCONSTRAINED),
         };
         let _ = rpc
@@ -337,20 +349,19 @@ async fn knowledge_good_channels(
 async fn knowledge_bad_channel(
     p: cln_plugin::Plugin<LnRadar>,
     erring_index: usize,
-    sendpay_path: &Vec<SendpayRoute>,
-    getroutes_path: &Vec<GetroutesRoutesPath>,
+    path: &Vec<RouteHop>,
     layer: &str,
 ) -> Result<()> {
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
-    if sendpay_path.len() <= erring_index || getroutes_path.len() <= erring_index {
-        return Err(anyhow!("erring_index is out of bounds"));
-    }
+    let hop = path
+        .get(erring_index)
+        .ok_or(anyhow!("erring_index is out of bounds"))?;
     let askrene_req = AskreneinformchannelRequest {
         layer: layer.to_string(),
-        amount_msat: Some(sendpay_path[erring_index].amount_msat),
-        short_channel_id_dir: getroutes_path[erring_index].short_channel_id_dir,
+        amount_msat: Some(hop.amount),
+        short_channel_id_dir: Some(hop.short_channel_id_dir),
         inform: Some(AskreneinformchannelInform::CONSTRAINED),
     };
     let _ = rpc
@@ -424,16 +435,13 @@ async fn reenable_channel(
 async fn knowledge_disable_channel(
     p: cln_plugin::Plugin<LnRadar>,
     erring_index: usize,
-    getroutes_path: &Vec<GetroutesRoutesPath>,
+    path: &Vec<RouteHop>,
     layer: &str,
 ) -> Result<()> {
-    let scidd = getroutes_path
+    let scidd = path
         .get(erring_index)
         .ok_or(anyhow!("erring_index is out of bounds"))?
-        .short_channel_id_dir
-        .ok_or(anyhow!(
-            "missing short_channel_id_dir in path {getroutes_path:?} at index {erring_index}"
-        ))?;
+        .short_channel_id_dir;
 
     disable_channel(p, scidd, layer).await
 }
@@ -442,7 +450,7 @@ async fn send_probe(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
     groupid: u64,
-) -> Result<ProbeResult> {
+) -> Result<ProbeAttempt> {
     // Only a limited number of probes is allowed to run concurrently, due to the limited available
     // number of HTLC slots in local channels.
     let lnradar = p.state();
@@ -467,7 +475,7 @@ async fn send_probe(
         maxparts: Some(1),
         final_cltv: Some(test_payment.prev_delay().into()),
     };
-    let mut getroutes = rpc
+    let getroutes = rpc
         .call_typed(&getroutes_req)
         .await
         .map_err(|e| anyhow!("getroutes failed: {e}"))?;
@@ -485,9 +493,8 @@ async fn send_probe(
         cln_rpc::primitives::Secret::try_from(test_payment.payment_secret.0.to_vec())
             .map_err(|e| anyhow!("invalid payment secret: {e}"))?;
     let partid = 0;
-    let mut sendpay_route = convert_routes(&getroutes.routes[0])
+    let (mut sendpay_route, path) = convert_routes(&getroutes.routes[0])
         .map_err(|e| anyhow!("couldn't convert routes types: {e}"))?;
-    let getroutes_path = getroutes.routes.remove(0).path;
     sendpay_route.push(test_payment.final_hop());
 
     let sendpay_req = SendpayRequest {
@@ -503,7 +510,7 @@ async fn send_probe(
         localinvreqid: None,
         payment_metadata: None,
     };
-    let sendpay = rpc
+    let _sendpay = rpc
         .call_typed(&sendpay_req)
         .await
         .map_err(|e| anyhow!("sendpay failed: {e}"))?;
@@ -543,11 +550,11 @@ async fn send_probe(
         }
     };
 
-    Ok(ProbeResult {
-        getroutes_path,
-        sendpay_route,
-        sendpay,
-        waitsendpay,
+    Ok(ProbeAttempt {
+        payment_hash: test_payment.payment_hash,
+        destination: test_payment.prev_destination(),
+        amount: Amount::from_msat(test_payment.amount_msat),
+        path,
         failcode,
         erring_index,
     })
@@ -555,48 +562,32 @@ async fn send_probe(
 
 async fn update_knowledge(
     p: cln_plugin::Plugin<LnRadar>,
-    results: &ProbeResult,
+    results: &ProbeAttempt,
     layer: &str,
 ) -> Result<()> {
     match results.failcode {
         ErrorCode::TemporaryChannelFailure => {
-            knowledge_bad_channel(
-                p.clone(),
-                results.erring_index,
-                &results.sendpay_route,
-                &results.getroutes_path,
-                layer,
-            )
-            .await
-            .map_err(|e| anyhow!("failed to update knowledge fro failed channel: {e}"))?;
+            knowledge_bad_channel(p.clone(), results.erring_index, &results.path, layer)
+                .await
+                .map_err(|e| anyhow!("failed to update knowledge fro failed channel: {e}"))?;
         }
         ErrorCode::FeeInsufficient => {
             // We could have taken the raw message from waitsendpay to update the channel fees, but
             // this is simpler.
-            knowledge_disable_channel(
-                p.clone(),
-                results.erring_index,
-                &results.getroutes_path,
-                layer,
-            )
-            .await
-            .map_err(|e| anyhow!("failed to disable bad channel: {e}"))?;
+            knowledge_disable_channel(p.clone(), results.erring_index, &results.path, layer)
+                .await
+                .map_err(|e| anyhow!("failed to disable bad channel: {e}"))?;
         }
         _ => {}
     };
 
-    knowledge_good_channels(
-        p.clone(),
-        results.erring_index,
-        &results.sendpay_route,
-        &results.getroutes_path,
-        layer,
-    )
-    .await
-    .map_err(|e| anyhow!("failed to update knowledge for good channels: {e}"))?;
+    knowledge_good_channels(p.clone(), results.erring_index, &results.path, layer)
+        .await
+        .map_err(|e| anyhow!("failed to update knowledge for good channels: {e}"))?;
     Ok(())
 }
 
+// FIXME: on success returns a ProbeResult
 async fn testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -643,10 +634,11 @@ async fn testpayment(
     Ok(json!(results))
 }
 
+// FIXME: this must return a ProbeResult
 async fn probe_loop(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
-) -> Result<ProbeResult> {
+) -> Result<ProbeAttempt> {
     let mut groupid: u64 = 0;
     let nodeid_str = serde_json::to_string(&test_payment.prev_destination()).unwrap_or_default();
     loop {
@@ -671,11 +663,12 @@ async fn probe_loop(
     }
 }
 
+// FIXME: this must return a ProbeResult
 async fn probe_loop_timeout(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
     timeout: tokio::time::Duration,
-) -> Result<ProbeResult> {
+) -> Result<ProbeAttempt> {
     let _probe = SEM_PROBES
         .acquire()
         .await
@@ -692,6 +685,7 @@ async fn probe_loop_timeout(
     result
 }
 
+// FIXME: on success returns a ProbeResult
 async fn testpayment_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -724,6 +718,7 @@ async fn testpayment_loop(
     Ok(json!(r))
 }
 
+// FIXME: on success returns an array of ProbeResult
 async fn testnetwork_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
