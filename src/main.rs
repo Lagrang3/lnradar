@@ -1,6 +1,5 @@
 use crate::primitives::{Amount, ShortChannelIdDir};
 use anyhow::{anyhow, Context, Result};
-use bitcoin::hashes::Hash;
 use bitcoin::network::Network;
 use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
@@ -481,8 +480,7 @@ async fn send_probe(
 
     // FIXME: maybe it would be better to keep byte types and then convert to specific library
     // types when needed
-    let payment_hash =
-        cln_rpc::primitives::Sha256::from_bytes_ref(test_payment.payment_hash.as_byte_array());
+    let payment_hash = cln_rpc::primitives::Sha256::from_bytes_ref(&test_payment.payment_hash);
     let payment_secret =
         cln_rpc::primitives::Secret::try_from(test_payment.payment_secret.0.to_vec())
             .map_err(|e| anyhow!("invalid payment secret: {e}"))?;

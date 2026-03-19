@@ -1,6 +1,5 @@
-use crate::primitives::{Amount, PublicKey, SecretKey};
+use crate::primitives::{Amount, PublicKey, SecretKey, Sha256};
 use anyhow::{anyhow, Result};
-use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::Secp256k1;
 use cln_rpc::model::requests::SendpayRoute;
 use lightning_invoice::{Bolt11Invoice, Currency, InvoiceBuilder};
@@ -14,7 +13,7 @@ pub struct TestPayment {
     pub fake_destination_priv: SecretKey,
     pub fake_destination_pubkey: PublicKey,
     pub payment_secret: PaymentSecret,
-    pub payment_hash: sha256::Hash,
+    pub payment_hash: Sha256,
     pub min_final_cltv_expiry: u16,
     pub route_hint: RouteHintHop,
     ctx: Secp256k1<bitcoin::secp256k1::All>,
@@ -39,8 +38,6 @@ impl TestPayment {
         SysRng
             .try_fill_bytes(&mut payment_hash[16..])
             .map_err(|e| anyhow!("failed creating payment_hash: {e}"))?;
-        let payment_hash = sha256::Hash::from_slice(&payment_hash[..])
-            .map_err(|e| anyhow!("error while converting payment_hash type: {e}"))?;
 
         let route_hint = RouteHintHop {
             src_node_id: real_destination.into(),
@@ -92,8 +89,9 @@ impl TestPayment {
         // that it has to go through the real destination.
         let rhs = RouteHint(vec![self.route_hint.clone()]);
         let btc_sk: bitcoin::secp256k1::SecretKey = self.fake_destination_priv.clone().into();
+        let payment_hash = bitcoin::hashes::sha256::Hash::from_bytes_ref(&self.payment_hash);
         InvoiceBuilder::new(currency)
-            .payment_hash(self.payment_hash)
+            .payment_hash(*payment_hash)
             .amount_milli_satoshis(self.amount_msat)
             .description("Test invoice".into())
             .current_timestamp()

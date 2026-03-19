@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::cmp::Ordering;
 
 pub use cln_rpc::primitives::{Amount, ShortChannelIdDir};
+pub type Sha256 = [u8; 32];
 
 // Incompatible versions of the bitcoin library for cln_rpc and lightning crates makes it
 // impossible to interoperably use a single PublicKey struct here.
