@@ -85,22 +85,22 @@ async fn main() -> anyhow::Result<()> {
         .rpcmethod(
             "testinvoice",
             "Command to generate a test invoice",
-            testinvoice,
+            json_testinvoice,
         )
         .rpcmethod(
             "testpayment",
             "Command to probe a payment path",
-            testpayment,
+            json_testpayment,
         )
         .rpcmethod(
             "testpayment-loop",
             "Command to try different probe paths to a destination",
-            testpayment_loop,
+            json_testpayment_loop,
         )
         .rpcmethod(
             "testnetwork-loop",
             "Command to try different probe paths to random destinations",
-            testnetwork_loop,
+            json_testnetwork_loop,
         )
         .dynamic()
         .configure()
@@ -245,7 +245,7 @@ async fn age_layer(
     Ok(json!(response))
 }
 
-async fn testinvoice(
+async fn json_testinvoice(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
 ) -> Result<Value, cln_plugin::Error> {
@@ -588,7 +588,7 @@ async fn update_knowledge(
 }
 
 // FIXME: on success returns a ProbeResult
-async fn testpayment(
+async fn json_testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
 ) -> Result<Value, cln_plugin::Error> {
@@ -686,7 +686,7 @@ async fn probe_loop_timeout(
 }
 
 // FIXME: on success returns a ProbeResult
-async fn testpayment_loop(
+async fn json_testpayment_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
 ) -> Result<Value, cln_plugin::Error> {
@@ -719,7 +719,7 @@ async fn testpayment_loop(
 }
 
 // FIXME: on success returns an array of ProbeResult
-async fn testnetwork_loop(
+async fn json_testnetwork_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
 ) -> Result<Value, cln_plugin::Error> {
