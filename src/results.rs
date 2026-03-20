@@ -106,7 +106,7 @@ impl Serialize for ProbeAttempt {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("ProbeAttempt", 6)?;
+        let mut state = serializer.serialize_struct("ProbeAttempt", 7)?;
         state.serialize_field("payment_hash", &hex::encode(&self.payment_hash))?;
         state.serialize_field("destination", &self.destination)?;
         state.serialize_field("amount_msat", &self.amount)?;

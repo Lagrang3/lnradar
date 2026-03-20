@@ -30,6 +30,9 @@ mod results;
 use crate::results::ErrorCode;
 use crate::results::{ProbeAttempt, ProbeResult, RouteHop};
 
+mod error;
+use crate::error::Error;
+
 // The default age time of xpay layer set to 1 hour is too small.
 // We remove knowledge older than 1 day.
 const LNRADAR_LAYER: &str = "lnradar";
@@ -450,7 +453,7 @@ async fn send_probe(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
     groupid: u64,
-) -> Result<ProbeAttempt> {
+) -> Result<ProbeAttempt, Error> {
     // Only a limited number of probes is allowed to run concurrently, due to the limited available
     // number of HTLC slots in local channels.
     let lnradar = p.state();
@@ -478,12 +481,12 @@ async fn send_probe(
     let getroutes = rpc
         .call_typed(&getroutes_req)
         .await
-        .map_err(|e| anyhow!("getroutes failed: {e}"))?;
+        .map_err(|e| Error::no_routes(e.to_string()))?;
     if getroutes.routes.len() != 1 {
-        return Err(anyhow!(
+        return Err(Error::other(format!(
             "Expecting getroutes to return exactly one route, got {} instead.",
             getroutes.routes.len()
-        ));
+        )));
     }
 
     // FIXME: maybe it would be better to keep byte types and then convert to specific library
@@ -544,9 +547,9 @@ async fn send_probe(
     let failcode = match ErrorCode::from_u64(raw_failcode) {
         Some(e) => e,
         None => {
-            return Err(anyhow!(
+            return Err(Error::other(format!(
                 "Unrecognized error code from waitsendpay: {waitsendpay}"
-            ));
+            )));
         }
     };
 
@@ -587,7 +590,6 @@ async fn update_knowledge(
     Ok(())
 }
 
-// FIXME: on success returns a ProbeResult
 async fn json_testpayment(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
