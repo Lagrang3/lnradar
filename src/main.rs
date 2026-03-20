@@ -28,7 +28,7 @@ use crate::testpayment::TestPayment;
 
 mod results;
 use crate::results::ErrorCode;
-use crate::results::{ProbeAttempt, ProbeResult, RouteHop};
+use crate::results::{ProbeAttempt, ProbeResult, Route, RouteHop};
 
 mod error;
 use crate::error::Error;
@@ -557,9 +557,11 @@ async fn send_probe(
         payment_hash: test_payment.payment_hash,
         destination: test_payment.prev_destination(),
         amount: Amount::from_msat(test_payment.amount_msat),
-        path,
-        failcode,
-        erring_index,
+        route: Route {
+            path,
+            failcode,
+            erring_index,
+        },
     })
 }
 
@@ -568,25 +570,40 @@ async fn update_knowledge(
     results: &ProbeAttempt,
     layer: &str,
 ) -> Result<()> {
-    match results.failcode {
+    match results.route.failcode {
         ErrorCode::TemporaryChannelFailure => {
-            knowledge_bad_channel(p.clone(), results.erring_index, &results.path, layer)
-                .await
-                .map_err(|e| anyhow!("failed to update knowledge fro failed channel: {e}"))?;
+            knowledge_bad_channel(
+                p.clone(),
+                results.route.erring_index,
+                &results.route.path,
+                layer,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to update knowledge fro failed channel: {e}"))?;
         }
         ErrorCode::FeeInsufficient => {
             // We could have taken the raw message from waitsendpay to update the channel fees, but
             // this is simpler.
-            knowledge_disable_channel(p.clone(), results.erring_index, &results.path, layer)
-                .await
-                .map_err(|e| anyhow!("failed to disable bad channel: {e}"))?;
+            knowledge_disable_channel(
+                p.clone(),
+                results.route.erring_index,
+                &results.route.path,
+                layer,
+            )
+            .await
+            .map_err(|e| anyhow!("failed to disable bad channel: {e}"))?;
         }
         _ => {}
     };
 
-    knowledge_good_channels(p.clone(), results.erring_index, &results.path, layer)
-        .await
-        .map_err(|e| anyhow!("failed to update knowledge for good channels: {e}"))?;
+    knowledge_good_channels(
+        p.clone(),
+        results.route.erring_index,
+        &results.route.path,
+        layer,
+    )
+    .await
+    .map_err(|e| anyhow!("failed to update knowledge for good channels: {e}"))?;
     Ok(())
 }
 
@@ -622,7 +639,7 @@ async fn json_testpayment(
         }
     };
 
-    match results.failcode {
+    match results.route.failcode {
         ErrorCode::UnknownNextPeer => {
             log::info!("Probe success");
         }
@@ -652,7 +669,7 @@ async fn probe_loop(
                 log::warn!("Failed to update knowledge: {e}");
             }
         };
-        match results.failcode {
+        match results.route.failcode {
             ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
                 log::info!("Probe success, nodeid={nodeid_str}");
                 return Ok(results);

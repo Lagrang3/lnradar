@@ -47,13 +47,17 @@ pub struct RouteHop {
     pub amount: Amount,
 }
 
+pub struct Route {
+    pub path: Vec<RouteHop>,
+    pub failcode: ErrorCode,
+    pub erring_index: usize,
+}
+
 pub struct ProbeAttempt {
     pub payment_hash: Sha256,
     pub destination: PublicKey,
     pub amount: Amount,
-    pub path: Vec<RouteHop>,
-    pub failcode: ErrorCode,
-    pub erring_index: usize,
+    pub route: Route,
 }
 
 pub struct ProbeResult {
@@ -101,19 +105,30 @@ impl Serialize for RouteHop {
     }
 }
 
+impl Serialize for Route {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("Route", 4)?;
+        state.serialize_field("failcode", &self.failcode)?;
+        state.serialize_field("failcodename", &self.failcode.to_string())?;
+        state.serialize_field("erring_index", &self.erring_index)?;
+        state.serialize_field("path", &self.path)?;
+        state.end()
+    }
+}
+
 impl Serialize for ProbeAttempt {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("ProbeAttempt", 7)?;
+        let mut state = serializer.serialize_struct("ProbeAttempt", 4)?;
         state.serialize_field("payment_hash", &hex::encode(&self.payment_hash))?;
         state.serialize_field("destination", &self.destination)?;
         state.serialize_field("amount_msat", &self.amount)?;
-        state.serialize_field("failcode", &self.failcode)?;
-        state.serialize_field("failcodename", &self.failcode.to_string())?;
-        state.serialize_field("erring_index", &self.erring_index)?;
-        state.serialize_field("path", &self.path)?;
+        state.serialize_field("route", &self.route)?;
         state.end()
     }
 }
