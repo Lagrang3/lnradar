@@ -17,6 +17,7 @@ use std::collections::BinaryHeap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::pin;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
@@ -653,52 +654,6 @@ async fn json_testpayment(
     Ok(json!(results))
 }
 
-async fn probe_loop(p: cln_plugin::Plugin<LnRadar>, test_payment: &TestPayment) -> ProbeResult {
-    let mut groupid: u64 = 0;
-    let nodeid_str = serde_json::to_string(&test_payment.prev_destination()).unwrap_or_default();
-    let mut routes = vec![];
-    loop {
-        groupid += 1;
-        let results = match send_probe(p.clone(), &test_payment, groupid).await {
-            Ok(r) => r,
-            Err(e) => {
-                return ProbeResult {
-                    payment_hash: test_payment.payment_hash,
-                    destination: test_payment.prev_destination(),
-                    amount: Amount::from_msat(test_payment.amount_msat),
-                    routes: routes,
-                    status: ProbeStatus::Failed,
-                    message: Some(format!("{e}")),
-                };
-            }
-        };
-        routes.push(results.route.clone());
-        match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
-            Ok(_) => {}
-            Err(e) => {
-                log::warn!("Failed to update knowledge: {e}");
-            }
-        };
-        match results.route.failcode {
-            ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
-                log::info!("Probe success, nodeid={nodeid_str}");
-                return ProbeResult {
-                    payment_hash: results.payment_hash,
-                    destination: results.destination,
-                    amount: results.amount,
-                    routes: routes,
-                    status: ProbeStatus::Success,
-                    message: None,
-                };
-            }
-            _ => {
-                log::info!("Probe failed, nodeid={nodeid_str}");
-                continue;
-            }
-        };
-    }
-}
-
 async fn probe_loop_timeout(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
@@ -717,23 +672,68 @@ async fn probe_loop_timeout(
             };
         }
     };
-    let result = tokio::select! {
-        r = probe_loop(p, &test_payment) => {
-            r
-        },
-        _ = tokio::time::sleep(timeout) => {
-            ProbeResult {
+
+    let timer = tokio::time::sleep(timeout);
+    pin!(timer);
+
+    let mut groupid: u64 = 0;
+    let nodeid_str = serde_json::to_string(&test_payment.prev_destination()).unwrap_or_default();
+    let mut routes = vec![];
+    let result: ProbeResult;
+
+    loop {
+        groupid += 1;
+
+        let attempt = tokio::select! {
+            sp = send_probe(p.clone(), &test_payment, groupid) => {
+                sp
+            },
+            _ = &mut timer => {
+                Err(Error::other(format!("time out while waiting for probe loop to finish")))
+            }
+        };
+
+        let attempt = match attempt {
+            Ok(r) => r,
+            Err(e) => {
+                result = ProbeResult {
                     payment_hash: test_payment.payment_hash,
                     destination: test_payment.prev_destination(),
                     amount: Amount::from_msat(test_payment.amount_msat),
-                    // FIXME: not right, because we might have tried already some routes at this
-                    // point
-                    routes: vec![],
+                    routes: routes,
                     status: ProbeStatus::Failed,
-                    message: Some(format!("time out while waiting for probe loop to finish"))
+                    message: Some(format!("{e}")),
+                };
+                break;
             }
-        }
-    };
+        };
+        routes.push(attempt.route.clone());
+        match update_knowledge(p.clone(), &attempt, LNRADAR_LAYER).await {
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("Failed to update knowledge: {e}");
+            }
+        };
+        match attempt.route.failcode {
+            ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
+                log::info!("Probe success, nodeid={nodeid_str}");
+                result = ProbeResult {
+                    payment_hash: attempt.payment_hash,
+                    destination: attempt.destination,
+                    amount: attempt.amount,
+                    routes: routes,
+                    status: ProbeStatus::Success,
+                    message: None,
+                };
+                break;
+            }
+            _ => {
+                log::info!("Probe failed, nodeid={nodeid_str}");
+                continue;
+            }
+        };
+    }
+
     drop(_probe);
     result
 }
