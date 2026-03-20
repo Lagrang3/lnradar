@@ -1,7 +1,6 @@
 use crate::primitives::{Amount, ShortChannelIdDir};
 use anyhow::{anyhow, Context, Result};
 use bitcoin::network::Network;
-use cln_plugin::{ConfiguredPlugin, Plugin};
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
     AskreneinformchannelRequest, AskrenelistlayersRequest, AskreneupdatechannelRequest,
@@ -14,7 +13,6 @@ use lightning_invoice::Currency;
 use rand::seq::IndexedRandom;
 use serde_json::{json, Value};
 use std::collections::BinaryHeap;
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::pin;
@@ -34,6 +32,9 @@ use crate::results::{ProbeAttempt, ProbeResult, ProbeStatus, Route, RouteHop};
 mod error;
 use crate::error::Error;
 
+mod util;
+use crate::util::FromPlugin;
+
 // The default age time of xpay layer set to 1 hour is too small.
 // We remove knowledge older than 1 day.
 const LNRADAR_LAYER: &str = "lnradar";
@@ -52,35 +53,6 @@ struct LnRadar {
     pub private_key: SecretKey,
     pub nodeid: PublicKey,
     pub disabled: Arc<Mutex<BinaryHeap<DisabledChannel>>>,
-}
-
-trait FromPlugin<P> {
-    async fn from_plugin(plugin: &P) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-impl<S: Clone + Send> FromPlugin<Plugin<S>> for ClnRpc {
-    async fn from_plugin(plugin: &Plugin<S>) -> Result<Self> {
-        ClnRpc::new(
-            Path::new(&plugin.configuration().lightning_dir).join(plugin.configuration().rpc_file),
-        )
-        .await
-    }
-}
-
-impl<
-        S: Clone + Send + Sync + 'static,
-        I: tokio::io::AsyncRead + Send + Unpin + 'static,
-        O: Send + tokio::io::AsyncWrite + Unpin + 'static,
-    > FromPlugin<ConfiguredPlugin<S, I, O>> for ClnRpc
-{
-    async fn from_plugin(plugin: &ConfiguredPlugin<S, I, O>) -> Result<Self> {
-        ClnRpc::new(
-            Path::new(&plugin.configuration().lightning_dir).join(plugin.configuration().rpc_file),
-        )
-        .await
-    }
 }
 
 #[tokio::main]
