@@ -29,6 +29,16 @@ impl ErrorCode {
             _ => None,
         }
     }
+
+    pub fn to_string(&self) -> String {
+        let s = match self {
+            ErrorCode::UnknownNextPeer => "UNKNOWN_NEXT_PEER",
+            ErrorCode::IncorrectOrUnknownPaymentDetails => "INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS",
+            ErrorCode::TemporaryChannelFailure => "TEMPORARY_CHANNEL_FAILURE",
+            ErrorCode::FeeInsufficient => "FEE_INSUFFICIENT",
+        };
+        s.to_string()
+    }
 }
 
 pub struct RouteHop {
@@ -102,7 +112,7 @@ impl Serialize for ProbeAttempt {
         state.serialize_field("destination", &self.destination)?;
         state.serialize_field("amount_msat", &self.amount)?;
         state.serialize_field("failcode", &self.failcode)?;
-        // FIXME: add human readable fail code
+        state.serialize_field("failcodename", &self.failcode.to_string())?;
         state.serialize_field("erring_index", &self.erring_index)?;
         state.serialize_field("path", &self.path)?;
         state.end()
