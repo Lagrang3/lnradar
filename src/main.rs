@@ -28,7 +28,7 @@ use crate::testpayment::TestPayment;
 
 mod results;
 use crate::results::ErrorCode;
-use crate::results::{ProbeAttempt, ProbeResult, Route, RouteHop};
+use crate::results::{ProbeAttempt, ProbeResult, ProbeStatus, Route, RouteHop};
 
 mod error;
 use crate::error::Error;
@@ -653,16 +653,26 @@ async fn json_testpayment(
     Ok(json!(results))
 }
 
-// FIXME: this must return a ProbeResult
-async fn probe_loop(
-    p: cln_plugin::Plugin<LnRadar>,
-    test_payment: &TestPayment,
-) -> Result<ProbeAttempt> {
+async fn probe_loop(p: cln_plugin::Plugin<LnRadar>, test_payment: &TestPayment) -> ProbeResult {
     let mut groupid: u64 = 0;
     let nodeid_str = serde_json::to_string(&test_payment.prev_destination()).unwrap_or_default();
+    let mut routes = vec![];
     loop {
         groupid += 1;
-        let results = send_probe(p.clone(), &test_payment, groupid).await?;
+        let results = match send_probe(p.clone(), &test_payment, groupid).await {
+            Ok(r) => r,
+            Err(e) => {
+                return ProbeResult {
+                    payment_hash: test_payment.payment_hash,
+                    destination: test_payment.prev_destination(),
+                    amount: Amount::from_msat(test_payment.amount_msat),
+                    routes: routes,
+                    status: ProbeStatus::Failed,
+                    message: Some(format!("{e}")),
+                };
+            }
+        };
+        routes.push(results.route.clone());
         match update_knowledge(p.clone(), &results, LNRADAR_LAYER).await {
             Ok(_) => {}
             Err(e) => {
@@ -672,7 +682,14 @@ async fn probe_loop(
         match results.route.failcode {
             ErrorCode::UnknownNextPeer | ErrorCode::IncorrectOrUnknownPaymentDetails => {
                 log::info!("Probe success, nodeid={nodeid_str}");
-                return Ok(results);
+                return ProbeResult {
+                    payment_hash: results.payment_hash,
+                    destination: results.destination,
+                    amount: results.amount,
+                    routes: routes,
+                    status: ProbeStatus::Success,
+                    message: None,
+                };
             }
             _ => {
                 log::info!("Probe failed, nodeid={nodeid_str}");
@@ -682,29 +699,45 @@ async fn probe_loop(
     }
 }
 
-// FIXME: this must return a ProbeResult
 async fn probe_loop_timeout(
     p: cln_plugin::Plugin<LnRadar>,
     test_payment: &TestPayment,
     timeout: tokio::time::Duration,
-) -> Result<ProbeAttempt> {
-    let _probe = SEM_PROBES
-        .acquire()
-        .await
-        .map_err(|e| anyhow!("failed to acquire probe semaphore: {e}"))?;
+) -> ProbeResult {
+    let _probe = match SEM_PROBES.acquire().await {
+        Ok(p) => p,
+        Err(e) => {
+            return ProbeResult {
+                payment_hash: test_payment.payment_hash,
+                destination: test_payment.prev_destination(),
+                amount: Amount::from_msat(test_payment.amount_msat),
+                routes: vec![],
+                status: ProbeStatus::Failed,
+                message: Some(format!("failed to acquire probe semaphore: {e}")),
+            };
+        }
+    };
     let result = tokio::select! {
         r = probe_loop(p, &test_payment) => {
             r
         },
         _ = tokio::time::sleep(timeout) => {
-            Err(anyhow!("time out while waiting for probe loop to finish"))
+            ProbeResult {
+                    payment_hash: test_payment.payment_hash,
+                    destination: test_payment.prev_destination(),
+                    amount: Amount::from_msat(test_payment.amount_msat),
+                    // FIXME: not right, because we might have tried already some routes at this
+                    // point
+                    routes: vec![],
+                    status: ProbeStatus::Failed,
+                    message: Some(format!("time out while waiting for probe loop to finish"))
+            }
         }
     };
     drop(_probe);
     result
 }
 
-// FIXME: on success returns a ProbeResult
 async fn json_testpayment_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
@@ -733,7 +766,7 @@ async fn json_testpayment_loop(
         &test_payment,
         tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS),
     )
-    .await?;
+    .await;
     Ok(json!(r))
 }
 
@@ -771,9 +804,23 @@ async fn json_testnetwork_loop(
         set.spawn(async move {
             let lnradar = plugin.state();
             let destination: PublicKey = nodeid.into();
-            let test_payment =
-                TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
-                    .map_err(|e| anyhow!("failed to create a test payment: {e}"))?;
+            let test_payment = match TestPayment::new(
+                amount_msat,
+                lnradar.private_key.clone(),
+                destination.clone(),
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    return ProbeResult {
+                        payment_hash: [0u8; 32],
+                        destination: destination,
+                        amount: Amount::from_msat(amount_msat),
+                        routes: vec![],
+                        status: ProbeStatus::Failed,
+                        message: Some(format!("failed to create a test payment: {e}")),
+                    };
+                }
+            };
             probe_loop_timeout(
                 plugin,
                 &test_payment,
@@ -784,12 +831,8 @@ async fn json_testnetwork_loop(
     }
 
     while let Some(res) = set.join_next().await {
-        // FIXME: add node info here as well
-        let r = match res? {
-            Ok(_) => json!({"status": "success"}),
-            Err(e) => json!({"status": "failed", "message": e.to_string()}),
-        };
-        results.push(r);
+        let res = res?;
+        results.push(res);
     }
 
     Ok(json!(results))

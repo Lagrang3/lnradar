@@ -1,7 +1,4 @@
 use crate::primitives::{Amount, PublicKey, Sha256, ShortChannelIdDir};
-use cln_rpc::model::requests::SendpayRoute;
-use cln_rpc::model::responses::{GetroutesRoutesPath, SendpayResponse};
-use cln_rpc::RpcError;
 use serde::ser::SerializeStruct;
 use serde::Serialize;
 
@@ -41,12 +38,14 @@ impl ErrorCode {
     }
 }
 
+#[derive(Clone)]
 pub struct RouteHop {
     pub short_channel_id_dir: ShortChannelIdDir,
     pub next_nodeid: PublicKey,
     pub amount: Amount,
 }
 
+#[derive(Clone)]
 pub struct Route {
     pub path: Vec<RouteHop>,
     pub failcode: ErrorCode,
@@ -60,26 +59,18 @@ pub struct ProbeAttempt {
     pub route: Route,
 }
 
-pub struct ProbeResult {
-    pub getroutes_path: Vec<GetroutesRoutesPath>,
-    pub sendpay_route: Vec<SendpayRoute>,
-    pub sendpay: SendpayResponse,
-    pub waitsendpay: RpcError,
-    pub failcode: ErrorCode,
-    pub erring_index: usize,
+pub enum ProbeStatus {
+    Success,
+    Failed,
 }
 
-impl Serialize for ProbeResult {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut state = serializer.serialize_struct("ProbeResult", 3)?;
-        state.serialize_field("getroutes", &self.getroutes_path)?;
-        state.serialize_field("sendpay", &self.sendpay)?;
-        state.serialize_field("waitsendpay", &self.waitsendpay)?;
-        state.end()
-    }
+pub struct ProbeResult {
+    pub payment_hash: Sha256,
+    pub destination: PublicKey,
+    pub amount: Amount,
+    pub routes: Vec<Route>,
+    pub status: ProbeStatus,
+    pub message: Option<String>,
 }
 
 impl Serialize for ErrorCode {
@@ -129,6 +120,34 @@ impl Serialize for ProbeAttempt {
         state.serialize_field("destination", &self.destination)?;
         state.serialize_field("amount_msat", &self.amount)?;
         state.serialize_field("route", &self.route)?;
+        state.end()
+    }
+}
+
+impl Serialize for ProbeStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match *self {
+            ProbeStatus::Success => serializer.serialize_unit_variant("ProbeStatus", 0, "Success"),
+            ProbeStatus::Failed => serializer.serialize_unit_variant("ProbeStatus", 1, "Failed"),
+        }
+    }
+}
+
+impl Serialize for ProbeResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("ProbeAttempt", 6)?;
+        state.serialize_field("payment_hash", &hex::encode(&self.payment_hash))?;
+        state.serialize_field("destination", &self.destination)?;
+        state.serialize_field("amount_msat", &self.amount)?;
+        state.serialize_field("routes", &self.routes)?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("message", &self.message)?;
         state.end()
     }
 }
