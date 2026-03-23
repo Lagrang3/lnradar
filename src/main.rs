@@ -59,7 +59,6 @@ static IS_PAYMENT_LAYER_OPT: DefaultBooleanConfigOption =
 struct LnRadar {
     pub currency: Currency,
     pub private_key: SecretKey,
-    pub nodeid: Arc<Mutex<Option<PublicKey>>>,
     pub disabled: Arc<Mutex<BinaryHeap<DisabledChannel>>>,
 }
 
@@ -96,6 +95,9 @@ async fn main() -> anyhow::Result<()> {
 
     let network = Network::from_str(plugin.configuration().network.as_str())?;
 
+    // FIXME: can we get the nodeid at this stage without breaking the plugin with the rpc_command
+    // hook?
+
     // The private key used for the final hop. It is well-known so the penultimate hop can
     // decode the onion.
     let private_key = SecretKey::from_byte_array([0xaa; 32])?;
@@ -103,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
     let state = LnRadar {
         currency: network.into(),
         private_key: private_key,
-        nodeid: Arc::new(Mutex::new(None)),
         disabled: Arc::new(Mutex::new(BinaryHeap::new())),
     };
     let plugin = plugin.start(state).await?;
@@ -477,25 +478,16 @@ async fn send_probe(
 ) -> Result<ProbeAttempt, Error> {
     // Only a limited number of probes is allowed to run concurrently, due to the limited available
     // number of HTLC slots in local channels.
-    let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin {e}"))?;
 
-    let mut lnradar_nodeid = lnradar.nodeid.lock().await;
-    let nodeid = match lnradar_nodeid.as_ref() {
-        Some(n) => n.clone(),
-        None => {
-            let getinfo = rpc.call_typed(&GetinfoRequest {}).await.map_err(|e| {
-                Error::other(format!(
-                    "Failed to call getinfo and the node id is needed: {e}"
-                ))
-            })?;
-            let nodeid: PublicKey = getinfo.id.clone().into();
-            *lnradar_nodeid = Some(nodeid.clone());
-            nodeid
-        }
-    };
+    let getinfo = rpc.call_typed(&GetinfoRequest {}).await.map_err(|e| {
+        Error::other(format!(
+            "Failed to call getinfo and the node id is needed: {e}"
+        ))
+    })?;
+    let nodeid: PublicKey = getinfo.id.clone().into();
 
     let getroutes_req = GetroutesRequest {
         source: nodeid.into(),
