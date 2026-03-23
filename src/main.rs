@@ -1,6 +1,7 @@
 use crate::primitives::{Amount, ShortChannelIdDir};
 use anyhow::{anyhow, Context, Result};
 use bitcoin::network::Network;
+use cln_plugin::options::DefaultBooleanConfigOption;
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
     AskreneinformchannelRequest, AskrenelistlayersRequest, AskreneupdatechannelRequest,
@@ -47,17 +48,25 @@ const LNRADAR_DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 static SEM_PROBES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
 
+static IS_PAYMENT_LAYER_OPT: DefaultBooleanConfigOption =
+    DefaultBooleanConfigOption::new_bool_with_default(
+        "lnradar-payment-layer",
+        false,
+        "Use \"lnradar\" as a payment layer.",
+    );
+
 #[derive(Clone)]
 struct LnRadar {
     pub currency: Currency,
     pub private_key: SecretKey,
-    pub nodeid: PublicKey,
+    pub nodeid: Arc<Mutex<Option<PublicKey>>>,
     pub disabled: Arc<Mutex<BinaryHeap<DisabledChannel>>>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let plugin = cln_plugin::Builder::new(tokio::io::stdin(), tokio::io::stdout())
+        .option(IS_PAYMENT_LAYER_OPT.clone())
         .rpcmethod(
             "testinvoice",
             "Command to generate a test invoice",
@@ -78,6 +87,8 @@ async fn main() -> anyhow::Result<()> {
             "Command to try different probe paths to random destinations",
             json_testnetwork_loop,
         )
+        // FIXME: use hook builder and add filters
+        .hook("rpc_command", json_xpay)
         .dynamic()
         .configure()
         .await?
@@ -89,14 +100,10 @@ async fn main() -> anyhow::Result<()> {
     // decode the onion.
     let private_key = SecretKey::from_byte_array([0xaa; 32])?;
 
-    let mut rpc = ClnRpc::from_plugin(&plugin).await?;
-    let getinfo = rpc.call_typed(&GetinfoRequest {}).await?;
-    let nodeid: PublicKey = getinfo.id.clone().into();
-
     let state = LnRadar {
         currency: network.into(),
         private_key: private_key,
-        nodeid: nodeid,
+        nodeid: Arc::new(Mutex::new(None)),
         disabled: Arc::new(Mutex::new(BinaryHeap::new())),
     };
     let plugin = plugin.start(state).await?;
@@ -219,6 +226,47 @@ async fn age_layer(
         .await
         .map_err(|e| anyhow!("askrene-age failed: {e}"))?;
     Ok(json!(response))
+}
+
+async fn json_xpay(
+    p: cln_plugin::Plugin<LnRadar>,
+    args: Value,
+) -> Result<Value, cln_plugin::Error> {
+    let add_layer = match p.option(&IS_PAYMENT_LAYER_OPT) {
+        Ok(x) => x,
+        Err(e) => {
+            log::warn!(
+                "Configuration {} couldn't be retreived: {}, default is false",
+                IS_PAYMENT_LAYER_OPT.name,
+                e
+            );
+            false
+        }
+    };
+    if add_layer {
+        match args["rpc_command"]["method"].as_str() {
+            Some("xpay") => {
+                log::debug!("got hook: {}", serde_json::to_string(&args).unwrap());
+                let mut new_args = json!({"replace": args["rpc_command"].clone()});
+                if let Some(Value::Array(arr)) = new_args["replace"]["params"].get_mut("layers") {
+                    arr.push(serde_json::Value::String(LNRADAR_LAYER.to_string()));
+                } else if let Some(Value::Object(par)) = new_args["replace"].get_mut("params") {
+                    par.insert("layers".to_string(), json!([LNRADAR_LAYER]));
+                }
+                log::debug!("Changed xpay call into: {new_args}");
+                // FIXME: positional arguments are not handled
+                return Ok(new_args);
+            }
+            Some("pay") => {
+                // FIXME: apply to pay as well
+                return Ok(json!({"result" : "continue"}));
+            }
+            _ => {
+                return Ok(json!({"result" : "continue"}));
+            }
+        }
+    }
+    Ok(json!({"result" : "continue"}))
 }
 
 async fn json_testinvoice(
@@ -434,8 +482,23 @@ async fn send_probe(
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin {e}"))?;
 
+    let mut lnradar_nodeid = lnradar.nodeid.lock().await;
+    let nodeid = match lnradar_nodeid.as_ref() {
+        Some(n) => n.clone(),
+        None => {
+            let getinfo = rpc.call_typed(&GetinfoRequest {}).await.map_err(|e| {
+                Error::other(format!(
+                    "Failed to call getinfo and the node id is needed: {e}"
+                ))
+            })?;
+            let nodeid: PublicKey = getinfo.id.clone().into();
+            *lnradar_nodeid = Some(nodeid.clone());
+            nodeid
+        }
+    };
+
     let getroutes_req = GetroutesRequest {
-        source: lnradar.nodeid.clone().into(),
+        source: nodeid.into(),
         destination: test_payment.prev_destination().into(),
         amount_msat: Amount::from_msat(test_payment.prev_amount_msat()),
         layers: vec![
