@@ -144,8 +144,21 @@ async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
                 }
             }
         }
-        Ok(_) => {
-            // layer already exists
+        Ok(response) => {
+            log::info!("\"{LNRADAR_LAYER}\" detected, tracking entries.");
+
+            // we either disable channels or add liquidity contraints, the liquidity constraints
+            // are already taken care off by askrene-age, but disabled channels are done manually
+            for l in response.layers {
+                if l.layer == LNRADAR_LAYER {
+                    if let Some(updates) = l.channel_updates {
+                        for u in updates {
+                            let scidd = u.short_channel_id_dir;
+                            add_to_disabled(p.clone(), scidd).await;
+                        }
+                    }
+                }
+            }
         }
     }
     loop {
@@ -353,12 +366,21 @@ async fn knowledge_bad_channel(
     Ok(())
 }
 
+async fn add_to_disabled(p: cln_plugin::Plugin<LnRadar>, scidd: ShortChannelIdDir) {
+    let lnradar = p.state();
+
+    let mut disabled_heap = lnradar.disabled.lock().await;
+    disabled_heap.push(DisabledChannel {
+        scidd: scidd,
+        time: std::time::SystemTime::now(),
+    });
+}
+
 async fn disable_channel(
     p: cln_plugin::Plugin<LnRadar>,
     scidd: ShortChannelIdDir,
     layer: &str,
 ) -> Result<()> {
-    let lnradar = p.state();
     let mut rpc = ClnRpc::from_plugin(&p)
         .await
         .map_err(|e| anyhow!("failed to fetch an rpc channel from plugin: {e}"))?;
@@ -373,11 +395,7 @@ async fn disable_channel(
         htlc_maximum_msat: None,
     };
 
-    let mut disabled_heap = lnradar.disabled.lock().await;
-    disabled_heap.push(DisabledChannel {
-        scidd: scidd,
-        time: std::time::SystemTime::now(),
-    });
+    add_to_disabled(p.clone(), scidd).await;
 
     let _ = rpc
         .call_typed(&askrene_req)
