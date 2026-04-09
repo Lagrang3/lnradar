@@ -86,8 +86,6 @@ async fn main() -> anyhow::Result<()> {
             "Command to try different probe paths to random destinations",
             json_testnetwork_loop,
         )
-        // FIXME: use hook builder and add filters
-        .hook("rpc_command", json_xpay)
         .dynamic()
         .configure()
         .await?
@@ -227,47 +225,6 @@ async fn age_layer(
         .await
         .map_err(|e| anyhow!("askrene-age failed: {e}"))?;
     Ok(json!(response))
-}
-
-async fn json_xpay(
-    p: cln_plugin::Plugin<LnRadar>,
-    args: Value,
-) -> Result<Value, cln_plugin::Error> {
-    let add_layer = match p.option(&IS_PAYMENT_LAYER_OPT) {
-        Ok(x) => x,
-        Err(e) => {
-            log::warn!(
-                "Configuration {} couldn't be retreived: {}, default is false",
-                IS_PAYMENT_LAYER_OPT.name,
-                e
-            );
-            false
-        }
-    };
-    if add_layer {
-        match args["rpc_command"]["method"].as_str() {
-            Some("xpay") => {
-                log::debug!("got hook: {}", serde_json::to_string(&args).unwrap());
-                let mut new_args = json!({"replace": args["rpc_command"].clone()});
-                if let Some(Value::Array(arr)) = new_args["replace"]["params"].get_mut("layers") {
-                    arr.push(serde_json::Value::String(LNRADAR_LAYER.to_string()));
-                } else if let Some(Value::Object(par)) = new_args["replace"].get_mut("params") {
-                    par.insert("layers".to_string(), json!([LNRADAR_LAYER]));
-                }
-                log::debug!("Changed xpay call into: {new_args}");
-                // FIXME: positional arguments are not handled
-                return Ok(new_args);
-            }
-            Some("pay") => {
-                // FIXME: apply to pay as well
-                return Ok(json!({"result" : "continue"}));
-            }
-            _ => {
-                return Ok(json!({"result" : "continue"}));
-            }
-        }
-    }
-    Ok(json!({"result" : "continue"}))
 }
 
 async fn json_testinvoice(
