@@ -87,6 +87,13 @@ enum Commands {
         #[arg(short, long)]
         destination: PublicKey,
     },
+    #[command()]
+    TestpaymentLoop {
+        #[arg(short, long)]
+        amount_msat: u64,
+        #[arg(short, long)]
+        destination: PublicKey,
+    },
 }
 
 #[tokio::main]
@@ -316,6 +323,12 @@ async fn json_lnradar(
                     destination,
                 } => {
                     return get_testpayment(p, amount_msat, destination).await;
+                }
+                Commands::TestpaymentLoop {
+                    amount_msat,
+                    destination,
+                } => {
+                    return get_testpayment_loop(p, amount_msat, destination).await;
                 }
             },
             None => {
@@ -853,8 +866,6 @@ async fn json_testpayment_loop(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
 ) -> Result<Value, cln_plugin::Error> {
-    let lnradar = p.state();
-
     // we use map_err instead of context because the plugin error message only contains the context
     // and not the details of the error
     let amount_msat = args["amount_msat"]
@@ -863,10 +874,18 @@ async fn json_testpayment_loop(
     let destination: PublicKey = serde_json::from_value(args["destination"].clone())
         .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
 
+    get_testpayment_loop(p, amount_msat, destination).await
+}
+
+async fn get_testpayment_loop(
+    p: cln_plugin::Plugin<LnRadar>,
+    amount_msat: u64,
+    destination: PublicKey,
+) -> Result<Value, cln_plugin::Error> {
+    let lnradar = p.state();
+
     log::trace!(
-        "testpayment called with amount_msat: {} and destination: {}",
-        args["amount_msat"],
-        args["destination"]
+        "testpayment called with amount_msat: {amount_msat} and destination: {destination}",
     );
 
     let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
