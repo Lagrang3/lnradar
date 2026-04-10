@@ -8,6 +8,7 @@ name = "lnradar"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "*", features = ["derive"] }
 log = "*"
 hex = "0.4.3"
 rand = { version = "0.10.0", features = ["sys_rng"] }

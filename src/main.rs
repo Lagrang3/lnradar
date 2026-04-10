@@ -1,6 +1,7 @@
 use crate::primitives::{Amount, ShortChannelIdDir};
 use anyhow::{anyhow, Context, Result};
 use bitcoin::network::Network;
+use clap::{CommandFactory, Parser, Subcommand};
 use cln_plugin::options::DefaultBooleanConfigOption;
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
@@ -14,6 +15,7 @@ use lightning_invoice::Currency;
 use rand::seq::IndexedRandom;
 use serde_json::{json, Value};
 use std::collections::BinaryHeap;
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::pin;
@@ -62,6 +64,24 @@ struct LnRadar {
     pub disabled: Arc<Mutex<BinaryHeap<DisabledChannel>>>,
 }
 
+#[derive(Parser)]
+#[command(name = "lnradar")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    #[command()]
+    Testinvoice {
+        #[arg(short, long)]
+        amount_msat: u64,
+        #[arg(short, long)]
+        destination: PublicKey,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let plugin = cln_plugin::Builder::new(tokio::io::stdin(), tokio::io::stdout())
@@ -85,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
             "testnetwork-loop",
             "Command to try different probe paths to random destinations",
             json_testnetwork_loop,
+        )
+        .rpcmethod(
+            "lnradar",
+            "A command line helper to access lnradar primitive commands",
+            json_lnradar,
         )
         .dynamic()
         .configure()
@@ -240,18 +265,83 @@ async fn age_layer(
     Ok(json!(response))
 }
 
+// A user friendly out-of-the-box CLI helper.
+// Stolen from "smaug" plugin (https://github.com/chrisguida/smaug)
+async fn json_lnradar(
+    p: cln_plugin::Plugin<LnRadar>,
+    args: Value,
+) -> Result<Value, cln_plugin::Error> {
+    let method = "lnradar".to_string();
+    let arg_vec = match args {
+        serde_json::Value::Array(a) => a,
+        _ => {
+            return Err(anyhow!("Only positional arguments are supported."));
+        }
+    };
+    let arg_vec: Result<VecDeque<String>> = arg_vec
+        .iter()
+        .map(|x| {
+            let x_arg = match x {
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::String(s) => s.to_string(),
+                _ => {
+                    return Err(anyhow!("Failed to parse command line argument as string"));
+                }
+            };
+            Ok(x_arg)
+        })
+        .collect();
+    let mut arg_vec = arg_vec?;
+    arg_vec.push_front(method);
+    log::debug!("arguments: {arg_vec:?}");
+    match Cli::try_parse_from(arg_vec.iter()) {
+        Ok(cli) => match cli.command {
+            Some(c) => match c {
+                Commands::Testinvoice {
+                    amount_msat,
+                    destination,
+                } => {
+                    return get_testinvoice(p, amount_msat, destination).await;
+                }
+            },
+            None => {
+                let help_json = json!({
+                    "help_msg": format!("\n{}", <Cli as CommandFactory>::command().render_help()),
+                    "format-hint": "simple",
+                });
+                return Ok(help_json);
+            }
+        },
+        Err(e) => {
+            let help_json = json!({
+                "help_msg": format!("\n{}", e.to_string()),
+                "format-hint": "simple",
+            });
+            Ok(help_json)
+        }
+    }
+}
+
 async fn json_testinvoice(
     p: cln_plugin::Plugin<LnRadar>,
     args: Value,
 ) -> Result<Value, cln_plugin::Error> {
-    let lnradar = p.state();
-
     // FIXME: implement positional arguments and amount_msat from string conversion
     let amount_msat = args["amount_msat"]
         .as_u64()
         .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
     let destination = PublicKey::from_value(&args["destination"])
         .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
+    get_testinvoice(p, amount_msat, destination).await
+}
+
+async fn get_testinvoice(
+    p: cln_plugin::Plugin<LnRadar>,
+    amount_msat: u64,
+    destination: PublicKey,
+) -> Result<Value, cln_plugin::Error> {
+    let lnradar = p.state();
 
     let test_payment = TestPayment::new(amount_msat, lnradar.private_key.clone(), destination)
         .map_err(|e| anyhow!("failed to create test_payment: {e}"))?;
