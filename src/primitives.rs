@@ -2,6 +2,7 @@ use anyhow::Result;
 use bitcoin::secp256k1::Secp256k1;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
 pub use cln_rpc::primitives::{Amount, ShortChannelIdDir};
@@ -65,13 +66,19 @@ impl Into<bitcoin::secp256k1::SecretKey> for SecretKey {
     }
 }
 
+impl Display for PublicKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let pk_hex = hex::encode(self.0.serialize());
+        write!(f, "{pk_hex}")
+    }
+}
+
 impl Serialize for PublicKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let pk_hex = hex::encode(self.0.serialize());
-        serializer.serialize_str(&pk_hex)
+        serializer.serialize_str(&self.to_string())
     }
 }
 
