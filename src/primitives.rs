@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
 use bitcoin::secp256k1::Secp256k1;
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
+use std::str::FromStr;
 
 pub use cln_rpc::primitives::{Amount, ShortChannelIdDir};
 pub type Sha256 = [u8; 32];
@@ -90,6 +91,27 @@ impl Serialize for PublicKey {
     {
         let pk_hex = hex::encode(self.0.serialize());
         serializer.serialize_str(&pk_hex)
+    }
+}
+
+impl FromStr for PublicKey {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // choose the format you expect; here: JSON
+        let pk: [u8; 33] = hex::FromHex::from_hex(s)?;
+        let pk = PublicKey::from_byte_array(pk)?;
+        Ok(pk)
+    }
+}
+
+impl<'de> Deserialize<'de> for PublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: String = Deserialize::deserialize(deserializer)?;
+        PublicKey::from_str(&s)
+            .map_err(|e| serde::de::Error::custom(format!("could not parse PublicKey: {e}")))
     }
 }
 
