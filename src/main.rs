@@ -23,7 +23,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 
 mod primitives;
-use crate::primitives::{DisabledChannel, FromJson, PublicKey, SecretKey};
+use crate::primitives::{DisabledChannel, PublicKey, SecretKey};
 
 mod testpayment;
 use crate::testpayment::TestPayment;
@@ -331,7 +331,7 @@ async fn json_testinvoice(
     let amount_msat = args["amount_msat"]
         .as_u64()
         .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
-    let destination = PublicKey::from_value(&args["destination"])
+    let destination: PublicKey = serde_json::from_value(args["destination"].clone())
         .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
     get_testinvoice(p, amount_msat, destination).await
 }
@@ -711,7 +711,7 @@ async fn json_testpayment(
     let amount_msat = args["amount_msat"]
         .as_u64()
         .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
-    let destination = PublicKey::from_value(&args["destination"])
+    let destination: PublicKey = serde_json::from_value(args["destination"].clone())
         .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
 
     log::trace!(
@@ -841,7 +841,7 @@ async fn json_testpayment_loop(
     let amount_msat = args["amount_msat"]
         .as_u64()
         .ok_or(anyhow!("Missing mandatory field amount_msat"))?;
-    let destination = PublicKey::from_value(&args["destination"])
+    let destination: PublicKey = serde_json::from_value(args["destination"].clone())
         .map_err(|e| anyhow!("failed to get mandatory field destination: {e}"))?;
 
     log::trace!(

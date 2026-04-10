@@ -1,7 +1,6 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bitcoin::secp256k1::Secp256k1;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 use std::cmp::Ordering;
 use std::str::FromStr;
 
@@ -63,24 +62,6 @@ impl SecretKey {
 impl Into<bitcoin::secp256k1::SecretKey> for SecretKey {
     fn into(self) -> bitcoin::secp256k1::SecretKey {
         self.0
-    }
-}
-
-pub trait FromJson {
-    fn from_value(value: &Value) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-impl FromJson for PublicKey {
-    fn from_value(value: &Value) -> Result<Self> {
-        let pk = value
-            .as_str()
-            .ok_or(anyhow!("failed to read field as str"))?;
-        let pk: [u8; 33] = hex::FromHex::from_hex(pk)
-            .map_err(|e| anyhow!("failed converting string to hex: {e}"))?;
-        PublicKey::from_byte_array(pk)
-            .map_err(|e| anyhow!("failed converting hex to PublicKey: {e}"))
     }
 }
 
