@@ -2,7 +2,7 @@ use crate::primitives::{Amount, ShortChannelIdDir};
 use anyhow::{anyhow, Context, Result};
 use bitcoin::network::Network;
 use clap::{CommandFactory, Parser, Subcommand};
-use cln_plugin::options::DefaultBooleanConfigOption;
+use cln_plugin::options::{DefaultBooleanConfigOption, StringArrayConfigOption};
 use cln_rpc::model::requests::{
     AskreneageRequest, AskrenecreatelayerRequest, AskreneinformchannelInform,
     AskreneinformchannelRequest, AskrenelistlayersRequest, AskreneupdatechannelRequest,
@@ -47,6 +47,8 @@ const LNRADAR_AGE_TIME_SECS: u64 = 86400;
 const LNRADAR_MAX_CONCURRENT_PROBES: usize = 5;
 // timeout for probes
 const LNRADAR_DEFAULT_TIMEOUT_SECS: u64 = 60;
+// time between automatic probes
+const LNRADAR_AUTO_PROBE_TIME_SECS: u64 = 600;
 
 static SEM_PROBES: Semaphore = Semaphore::const_new(LNRADAR_MAX_CONCURRENT_PROBES);
 
@@ -56,6 +58,11 @@ static IS_PAYMENT_LAYER_OPT: DefaultBooleanConfigOption =
         false,
         "Use \"lnradar\" as a payment layer.",
     );
+
+static DESTINATIONS_OPT: StringArrayConfigOption = StringArrayConfigOption::new_str_arr_no_default(
+    "lnradar-add-destination",
+    "Add a destination for frequent probes.",
+);
 
 #[derive(Clone)]
 struct LnRadar {
@@ -100,6 +107,7 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let plugin = cln_plugin::Builder::new(tokio::io::stdin(), tokio::io::stdout())
         .option(IS_PAYMENT_LAYER_OPT.clone())
+        .option(DESTINATIONS_OPT.clone())
         .rpcmethod(
             "testinvoice",
             "Command to generate a test invoice",
@@ -151,7 +159,52 @@ async fn main() -> anyhow::Result<()> {
         care_of_layers(p).await;
     });
 
+    let p = plugin.clone();
+    tokio::spawn(async move {
+        probe_top_destinations(p).await;
+    });
+
     plugin.join().await
+}
+
+async fn probe_top_destinations(p: cln_plugin::Plugin<LnRadar>) {
+    let dests = match p.option(&DESTINATIONS_OPT) {
+        Ok(dlist) => dlist,
+        Err(e) => {
+            log::warn!("Failed to fetch option {}: {}", DESTINATIONS_OPT.name, e);
+            None
+        }
+    };
+    let mut rng: rand::rngs::StdRng = rand::make_rng();
+    loop {
+        // Every LNRADAR_AUTO_PROBE_TIME_SECS time intervals we wake up and make a probe to some
+        // destination.
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            LNRADAR_AUTO_PROBE_TIME_SECS,
+        ))
+        .await;
+        if let Some(ref v) = dests {
+            if let Some(d) = v.choose(&mut rng) {
+                let destination = match PublicKey::from_str(&d) {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        log::warn!("Could not decode public key from lnrandar-add-destination option \"{d}\": {e}");
+                        continue;
+                    }
+                };
+                let ret = match get_testpayment_loop(p.clone(), 1000000, destination).await {
+                    Ok(r) => r["status"]
+                        .as_str()
+                        .unwrap_or("failed (missing status)")
+                        .to_string(),
+                    Err(e) => format!("failed ({e})"),
+                };
+                log::debug!("Probing destination {}: {}", d, ret);
+            }
+        } else {
+            // FIXME: probe other random destinations?
+        }
+    }
 }
 
 async fn care_of_layers(p: cln_plugin::Plugin<LnRadar>) {
