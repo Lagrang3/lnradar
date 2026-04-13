@@ -36,7 +36,7 @@ impl TestPayment {
         // test payment.
         let mut payment_hash = [0xaa; 32];
         SysRng
-            .try_fill_bytes(&mut payment_hash[16..])
+            .try_fill_bytes(&mut payment_hash[..])
             .map_err(|e| anyhow!("failed creating payment_hash: {e}"))?;
 
         let route_hint = RouteHintHop {
