@@ -185,8 +185,8 @@ async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
             LNRADAR_AUTO_PROBE_TIME_SECS,
         ))
         .await;
-        // The amount is randomly chosen as a power of 2 (sats) from 1 up to 2^18 (~200k)
-        let log_amount = rng.random_range(0..=18);
+        // The amount is randomly chosen as a power of 2 (sats) from 128 up to 2^18 (~250k)
+        let log_amount = rng.random_range(7..=18);
         let amount_sat = 2u64.pow(log_amount);
         let amount_msat = amount_sat * 1000;
 
