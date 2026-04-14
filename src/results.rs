@@ -50,6 +50,7 @@ pub struct Route {
     pub path: Vec<RouteHop>,
     pub failcode: ErrorCode,
     pub erring_index: usize,
+    pub latency_secs: f64,
 }
 
 pub struct ProbeAttempt {
@@ -119,6 +120,7 @@ impl Serialize for Route {
         state.serialize_field("failcode", &self.failcode)?;
         state.serialize_field("failcodename", &self.failcode.to_string())?;
         state.serialize_field("erring_index", &self.erring_index)?;
+        state.serialize_field("latency_secs", &self.latency_secs)?;
         state.serialize_field("path", &self.path)?;
         state.end()
     }

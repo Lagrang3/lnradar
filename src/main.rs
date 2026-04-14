@@ -216,10 +216,14 @@ async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
                 )
                 .await;
                 log::debug!(
-                    "Probing destination {} with {}msat: {}",
+                    "Probing destination {} with {}msat: {}, latencies: {:?}",
                     d,
                     amount_msat,
-                    r.pretty_status()
+                    r.pretty_status(),
+                    r.routes
+                        .iter()
+                        .map(|x| x.latency_secs)
+                        .collect::<Vec<f64>>()
                 );
             }
         } else {
@@ -718,11 +722,15 @@ async fn send_probe(
         groupid: Some(groupid),
         timeout: Some(60),
     };
+
+    let tbefore = std::time::Instant::now();
     let waitsendpay = rpc
         .call_typed(&waitsendpay_req)
         .await
         .err()
         .ok_or(anyhow!("unexpected waitsendpay success"))?;
+    let tafter = std::time::Instant::now();
+    let latency_secs = tafter.duration_since(tbefore).as_secs_f64();
 
     let data = waitsendpay
         .data
@@ -754,6 +762,7 @@ async fn send_probe(
             path,
             failcode,
             erring_index,
+            latency_secs,
         },
     })
 }
