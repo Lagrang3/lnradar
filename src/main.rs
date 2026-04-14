@@ -60,7 +60,7 @@ static IS_PAYMENT_LAYER_OPT: DefaultBooleanConfigOption =
     );
 
 static DESTINATIONS_OPT: StringArrayConfigOption = StringArrayConfigOption::new_str_arr_no_default(
-    "lnradar-add-destination",
+    "lnradar-favorite-destination",
     "Add a destination for frequent probes.",
 );
 
@@ -161,13 +161,13 @@ async fn main() -> anyhow::Result<()> {
 
     let p = plugin.clone();
     tokio::spawn(async move {
-        probe_top_destinations(p).await;
+        probe_favorite_destinations(p).await;
     });
 
     plugin.join().await
 }
 
-async fn probe_top_destinations(p: cln_plugin::Plugin<LnRadar>) {
+async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
     let dests = match p.option(&DESTINATIONS_OPT) {
         Ok(dlist) => dlist,
         Err(e) => {
