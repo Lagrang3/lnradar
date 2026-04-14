@@ -212,7 +212,7 @@ async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
                 let r = probe_loop_timeout(
                     p.clone(),
                     &test_payment,
-                    tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS),
+                    tokio::time::Duration::from_secs(LNRADAR_AUTO_PROBE_TIME_SECS / 2),
                 )
                 .await;
                 log::debug!(
