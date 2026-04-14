@@ -73,6 +73,20 @@ pub struct ProbeResult {
     pub message: Option<String>,
 }
 
+impl ProbeResult {
+    pub fn pretty_status(&self) -> String {
+        let s = serde_json::to_string(&self.status).unwrap_or_default();
+        match &self.message {
+            Some(m) => {
+                format!("{s} ({m})")
+            }
+            None => {
+                format!("{s}")
+            }
+        }
+    }
+}
+
 impl Serialize for ErrorCode {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

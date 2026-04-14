@@ -169,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
+    let lnradar = p.state();
     let dests = match p.option(&DESTINATIONS_OPT) {
         Ok(dlist) => dlist,
         Err(e) => {
@@ -199,18 +200,26 @@ async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
                         continue;
                     }
                 };
-                let ret = match get_testpayment_loop(p.clone(), amount_msat, destination).await {
-                    Ok(r) => r["status"]
-                        .as_str()
-                        .unwrap_or("failed (missing status)")
-                        .to_string(),
-                    Err(e) => format!("failed ({e})"),
-                };
+                let test_payment =
+                    match TestPayment::new(amount_msat, lnradar.private_key.clone(), destination) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            log::warn!("failed to create a test payment: {e}");
+                            continue;
+                        }
+                    };
+                // Failure is typically a timeout or an unreacheable destination.
+                let r = probe_loop_timeout(
+                    p.clone(),
+                    &test_payment,
+                    tokio::time::Duration::from_secs(LNRADAR_DEFAULT_TIMEOUT_SECS),
+                )
+                .await;
                 log::debug!(
                     "Probing destination {} with {}msat: {}",
                     d,
                     amount_msat,
-                    ret
+                    r.pretty_status()
                 );
             }
         } else {
