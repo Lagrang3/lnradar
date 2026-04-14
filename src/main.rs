@@ -13,6 +13,7 @@ use cln_rpc::model::responses::GetroutesRoutes;
 use cln_rpc::ClnRpc;
 use lightning_invoice::Currency;
 use rand::seq::IndexedRandom;
+use rand::RngExt;
 use serde_json::{json, Value};
 use std::collections::BinaryHeap;
 use std::collections::VecDeque;
@@ -183,6 +184,12 @@ async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
             LNRADAR_AUTO_PROBE_TIME_SECS,
         ))
         .await;
+        // The amount is randomly chosen as a power of 2 (sats) from 1 up to 2^18 (~200k)
+        let log_amount = rng.random_range(0..=18);
+        let amount_sat = 2u64.pow(log_amount);
+        let amount_msat = amount_sat * 1000;
+
+        // The destination is randomly chosen from the set of "favorite" destinations.
         if let Some(ref v) = dests {
             if let Some(d) = v.choose(&mut rng) {
                 let destination = match PublicKey::from_str(&d) {
@@ -192,14 +199,19 @@ async fn probe_favorite_destinations(p: cln_plugin::Plugin<LnRadar>) {
                         continue;
                     }
                 };
-                let ret = match get_testpayment_loop(p.clone(), 1000000, destination).await {
+                let ret = match get_testpayment_loop(p.clone(), amount_msat, destination).await {
                     Ok(r) => r["status"]
                         .as_str()
                         .unwrap_or("failed (missing status)")
                         .to_string(),
                     Err(e) => format!("failed ({e})"),
                 };
-                log::debug!("Probing destination {}: {}", d, ret);
+                log::debug!(
+                    "Probing destination {} with {}msat: {}",
+                    d,
+                    amount_msat,
+                    ret
+                );
             }
         } else {
             // FIXME: probe other random destinations?
