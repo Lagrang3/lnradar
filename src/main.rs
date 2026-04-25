@@ -73,7 +73,11 @@ struct LnRadar {
 }
 
 #[derive(Parser)]
-#[command(name = "lnradar")]
+#[command(
+    name = "lnradar",
+    bin_name = "lightning-cli -- lnradar",
+    about = "A CLN plugin to probe the lightning network to estimate liquidity allocation."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -81,21 +85,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command()]
+    #[command(about = "Create an invoice that can be used to make a payment probe.")]
     Testinvoice {
         #[arg(short, long)]
         amount_msat: u64,
         #[arg(short, long)]
         destination: PublicKey,
     },
-    #[command()]
+    #[command(about = "Make a single payment probe attempt to a desired destination.")]
     Testpayment {
         #[arg(short, long)]
         amount_msat: u64,
         #[arg(short, long)]
         destination: PublicKey,
     },
-    #[command()]
+    #[command(about = "Make several payment probes in a loop.")]
     TestpaymentLoop {
         #[arg(short, long)]
         amount_msat: u64,
