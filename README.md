@@ -81,3 +81,8 @@ lnradar-favorite-destination=03864ef025fde8fb587d989186ce6a4a186895ee44a926bfc37
 # Wallet of Satoshi
 lnradar-favorite-destination=035e4ff418fc8b5554c5d9eea66396c227bd429a3251c8cbc711002ba215bfc226
 ```
+
+# Acknowledgement
+
+This plugin is based on an earlier `paytest` plugin by @cdecker.
+Thanks to @endothermicdev for heads up and discussions.
