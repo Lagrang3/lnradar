@@ -51,7 +51,21 @@ destination or there no more available paths we could try.
 
 # Installation
 
-To do.
+lnradar is a Core-Lightning (CLN) written in Rust. In order to add this plugin
+to CLN the binary `lnradar` must first be built in this project.
+Whith Rust [intalled](https://rust-lang.org/tools/install/) in your environemnt
+run the following:
+```
+cargo build
+```
+This command will generate the plugin at the following path `./target/debug/lnradar`.
+
+Then you may add the path to `lnradar` in your CLN configuration file, eg.
+```
+plugin=<your build directory>/target/debug/lnradar
+```
+Restart ligthningd and `lnradar` should be running.
+
 
 # Settings
 
