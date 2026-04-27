@@ -39,13 +39,13 @@ the destination node with either `unknown_next_peer` or
 `incorrect_or_unknown_payment_details`.
 
 The `testpayment` sub-command can be used to make a single direct probe through
-lnradar to selected destination. lnradar uses askrene's `getroutes` method to
+lnradar to a selected destination. lnradar uses askrene's `getroutes` method to
 compute a path candidate. Internally lnradar will be able to gather the
 liquidity information from this probe and save it into "lnradar" askrene layer.
 A probe is said to be successfull if get an `unknown_next_peer` or
 `incorrect_or_unknown_payment_details` at the destination node.
 
-The `testpayment-loop` sub-command performs many consequitive payment probes to
+The `testpayment-loop` sub-command performs many consecutive payment probes to
 the selected destination until either a probe successfully reaches the
 destination or there no more available paths we could try.
 
